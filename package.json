@@ -1,5 +1,5 @@
 {
-  "name": "github-graph-visualizer",
+  "name": "gitgraph",
   "version": "1.0.0",
   "scripts": {
     "start": "npx serve . --listen $PORT"

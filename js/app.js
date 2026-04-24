@@ -1,7 +1,7 @@
 class App {
   constructor() {
     this.api   = new GitHubAPI();
-    this.graph = new GraphVisualizer('graph');
+    this.graph = new GitGraph('graph');
 
     // Canonical data — node objects are reused across renders so D3 keeps positions
     this.nodeMap  = new Map();  // id → node object
@@ -13,10 +13,15 @@ class App {
     this.graph.onNodeClick = n => n ? this._showInfo(n) : this._hideInfo();
 
     // Double-click a user/org/contributor → expand their repos INTO the current graph
+    // Double-click a repo → dive in and show its contributors, languages, and topics
     this.graph.onNodeDblClick = n => {
-      const login = n.data?.login;
-      if (login && (n.type === 'user' || n.type === 'org' || n.type === 'contributor')) {
-        this._expand(login);
+      if (n.type === 'repo') {
+        this._expandRepo(n);
+      } else {
+        const login = n.data?.login;
+        if (login && (n.type === 'user' || n.type === 'org' || n.type === 'contributor')) {
+          this._expand(login);
+        }
       }
     };
 
@@ -154,6 +159,68 @@ class App {
     }
   }
 
+  // ── Expand a repo (dive in) ────────────────────────────
+
+  async _expandRepo(node) {
+    if (this.loading || node.expanded) return;
+    this.loading = true;
+    const repo = node.data;
+    this._setLoading(true, `Diving into ${repo.name}…`);
+    this._setError('');
+
+    try {
+      node.expanded = true;
+      node.radius = Math.max(node.radius, 16);
+      const repoId = node.id;
+      const owner  = repo.owner.login;
+
+      const [langs, contribs, topics] = await Promise.allSettled([
+        this.api.getLanguages(owner, repo.name),
+        this.api.getContributors(owner, repo.name),
+        this.api.getTopics(owner, repo.name),
+      ]);
+
+      if (langs.status === 'fulfilled') {
+        for (const lang of Object.keys(langs.value).slice(0, 5)) {
+          const id = `lang:${lang}`;
+          if (!this.nodeMap.has(id)) {
+            this.nodeMap.set(id, { id, type: 'language', label: lang, radius: 7, data: { name: lang } });
+          }
+          this._addLink(repoId, id);
+        }
+      }
+
+      if (contribs.status === 'fulfilled') {
+        for (const c of contribs.value.slice(0, 6)) {
+          if (c.type === 'Bot') continue;
+          const id = `contributor:${c.login}`;
+          if (!this.nodeMap.has(id)) {
+            this.nodeMap.set(id, { id, type: 'contributor', label: c.login, radius: 9, data: c });
+          }
+          this._addLink(repoId, id);
+        }
+      }
+
+      if (topics.status === 'fulfilled') {
+        for (const topic of topics.value.slice(0, 5)) {
+          const id = `topic:${topic}`;
+          if (!this.nodeMap.has(id)) {
+            this.nodeMap.set(id, { id, type: 'topic', label: topic, radius: 7, data: { name: topic } });
+          }
+          this._addLink(repoId, id);
+        }
+      }
+
+      this._render();
+    } catch (e) {
+      this._setError(e.message);
+    } finally {
+      this.loading = false;
+      this._setLoading(false);
+      this._updateRateLimit();
+    }
+  }
+
   // ── Shared helpers ─────────────────────────────────────
 
   async _fetchAndAddRepos(entity, anchorId, limit = 25) {
@@ -281,10 +348,22 @@ class App {
     if (showL) visible.add('language');
     if (showT) visible.add('topic');
 
+    // Nodes linked to expanded repos should always be visible
+    const expandedRepoIds = new Set();
+    for (const n of this.nodeMap.values()) {
+      if (n.type === 'repo' && n.expanded) expandedRepoIds.add(n.id);
+    }
+    const expandedChildren = new Set();
+    for (const l of this.linkList) {
+      if (expandedRepoIds.has(l._src)) expandedChildren.add(l._tgt);
+      if (expandedRepoIds.has(l._tgt)) expandedChildren.add(l._src);
+    }
+
     const nodes = Array.from(this.nodeMap.values()).filter(n => {
-      if (!visible.has(n.type)) return false;
       if (hideForks && n.type === 'repo' && n.data?.fork) return false;
-      return true;
+      if (visible.has(n.type)) return true;
+      if (expandedChildren.has(n.id)) return true;
+      return false;
     });
     const nodeIds = new Set(nodes.map(n => n.id));
 
@@ -348,6 +427,7 @@ class App {
         ${d.license?.spdx_id ? `<div class="info-meta">📄 ${esc(d.license.spdx_id)}</div>` : ''}
         ${d.topics?.length ? `<div class="info-topics">${d.topics.slice(0,6).map(t => `<span class="topic-chip">${esc(t)}</span>`).join('')}</div>` : ''}
         <a class="info-link" href="${d.html_url}" target="_blank" rel="noopener">View on GitHub →</a>
+        ${node.expanded ? `<div class="action-hint">expanded</div>` : `<div class="action-hint">double-click to dive in</div>`}
       `;
     } else if (node.type === 'contributor') {
       html = `

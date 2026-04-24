@@ -1,12 +1,10 @@
-class GraphVisualizer {
+class GitGraph {
   constructor(svgId) {
     this.svgEl = document.getElementById(svgId);
     this.nodes = [];
     this.links = [];
     this.simulation = null;
     this.selectedNode = null;
-    this._ptimer = null;
-
     this.onNodeClick = null;
     this.onNodeDblClick = null;
 
@@ -21,7 +19,6 @@ class GraphVisualizer {
 
     this._init();
     this._bindResize();
-    this._startParticleTimer();
   }
 
   get W() { return this.svgEl.clientWidth; }
@@ -55,8 +52,6 @@ class GraphVisualizer {
 
     this.root      = svg.append('g').attr('class', 'graph-root');
     this.linkLayer = this.root.append('g').attr('class', 'links');
-    // Particle layer sits above links but below nodes
-    this.pLayer    = this.root.append('g').attr('class', 'particles').attr('pointer-events', 'none');
     this.nodeLayer = this.root.append('g').attr('class', 'nodes');
 
     this.simulation = d3.forceSimulation()
@@ -108,48 +103,11 @@ class GraphVisualizer {
     }).observe(this.svgEl.parentElement);
   }
 
-  // ── Particle animation ────────────────────────────────
-
-  _startParticleTimer() {
-    if (this._ptimer) this._ptimer.stop();
-    const colors = this.colors;
-
-    this._ptimer = d3.timer(() => {
-      const now = Date.now() * 0.001;
-
-      this.pLayer.selectAll('circle.ptcl').each(function(link) {
-        // source/target are node objects only after the simulation has run
-        if (!link.source?.x || !link.target?.x) return;
-
-        const isShared = link._type === 'shared-contributor';
-        const speed    = isShared ? 0.28 : 0.50;
-        const phase    = ((now * speed) + link._phaseOffset) % 1;
-
-        const x = link.source.x + (link.target.x - link.source.x) * phase;
-        const y = link.source.y + (link.target.y - link.source.y) * phase;
-        // Fade in/out at endpoints
-        const maxAlpha = isShared ? 0.38 : 0.85;
-        const opacity  = Math.sin(Math.PI * phase) * maxAlpha;
-
-        // Raw DOM calls — avoid D3 overhead inside a 60fps loop
-        this.setAttribute('cx', x);
-        this.setAttribute('cy', y);
-        this.setAttribute('opacity', opacity);
-      });
-    });
-  }
-
   // ── Render ────────────────────────────────────────────
 
   update(nodes, links) {
     this.nodes = nodes;
     this.links = links;
-
-    // Stamp a stable phase offset on every link so the timer can use it
-    // without relying on array index (which shifts as links are added/removed)
-    links.forEach(l => {
-      if (l._phaseOffset === undefined) l._phaseOffset = _hashPhase(l._key);
-    });
 
     // ── Links ──
     this.linkLayer.selectAll('line.link')
@@ -166,19 +124,6 @@ class GraphVisualizer {
           .attr('stroke',           d => _linkStroke(d))
           .attr('stroke-dasharray', d => d._type === 'shared-contributor' ? '5,4' : null),
         exit => exit.transition().duration(250).attr('opacity', 0).remove()
-      );
-
-    // ── Particles (one per link, colour = target node type) ──
-    this.pLayer.selectAll('circle.ptcl')
-      .data(links, d => d._key)
-      .join(
-        enter => enter.append('circle')
-          .attr('class', 'ptcl')
-          .attr('r',    d => d._type === 'shared-contributor' ? 1.5 : 2)
-          .attr('fill', d => this.colors[d.target?.type] || '#fff')
-          .attr('opacity', 0),
-        update => update,
-        exit => exit.remove()
       );
 
     // ── Nodes ──
@@ -315,11 +260,4 @@ class GraphVisualizer {
 
 function _linkStroke(l) {
   return l._type === 'shared-contributor' ? 'rgba(63,185,80,0.22)' : 'rgba(255,255,255,0.1)';
-}
-
-// Deterministic [0,1) offset from a string — keeps particles spread regardless of sort order
-function _hashPhase(str) {
-  let h = 5381;
-  for (let i = 0; i < str.length; i++) h = (((h << 5) + h) + str.charCodeAt(i)) >>> 0;
-  return (h % 10000) / 10000;
 }
