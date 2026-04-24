@@ -3,18 +3,20 @@ class App {
     this.api   = new GitHubAPI();
     this.graph = new GraphVisualizer('graph');
 
-    // Canonical data store: node objects are reused so D3 keeps positions
+    // Canonical data — node objects are reused across renders so D3 keeps positions
     this.nodeMap  = new Map();  // id → node object
-    this.linkList = [];         // { source, target, _key }
-    this.linkSet  = new Set();  // _key strings for dedup
+    this.linkList = [];         // { _key, _src, _tgt }  (regular edges only)
+    this.linkSet  = new Set();  // deduplicate regular edges
 
     this.loading = false;
 
-    this.graph.onNodeClick    = n => n ? this._showInfo(n) : this._hideInfo();
+    this.graph.onNodeClick = n => n ? this._showInfo(n) : this._hideInfo();
+
+    // Double-click a user/org/contributor → expand their repos INTO the current graph
     this.graph.onNodeDblClick = n => {
       const login = n.data?.login;
       if (login && (n.type === 'user' || n.type === 'org' || n.type === 'contributor')) {
-        this._search(login);
+        this._expand(login);
       }
     };
 
@@ -53,13 +55,12 @@ class App {
     if (q) { document.getElementById('search').value = q; this._search(q); }
   }
 
-  // ── Core search flow ───────────────────────────────────
+  // ── Fresh search (resets graph) ────────────────────────
 
   async _search(username) {
     if (!username || this.loading) return;
     this.loading = true;
 
-    // Reset state
     this.nodeMap.clear();
     this.linkList = [];
     this.linkSet.clear();
@@ -68,13 +69,11 @@ class App {
     this._setError('');
     this._setLoading(true, 'Fetching profile…');
 
-    // Update URL
     const url = new URL(location.href);
     url.searchParams.set('user', username);
     history.replaceState({}, '', url);
 
     try {
-      // 1. Profile
       const entity = await this.api.getEntity(username);
       const type   = entity.type === 'Organization' ? 'org' : 'user';
       const rootId = `${type}:${entity.login}`;
@@ -84,55 +83,18 @@ class App {
         radius: 28, data: entity,
       });
 
-      // 2. Repositories
       this._setLoading(true, 'Fetching repositories…');
-      const allRepos  = await this.api.getRepos(entity.login, entity.type);
-      const hideForks = document.getElementById('hide-forks').checked;
-      const repos     = allRepos.filter(r => !r.private && (!hideForks || !r.fork)).slice(0, 25);
+      const repos = await this._fetchAndAddRepos(entity, rootId);
 
-      for (const repo of repos) {
-        const id = `repo:${repo.full_name}`;
-        const stars = repo.stargazers_count || 0;
-        this.nodeMap.set(id, {
-          id, type: 'repo', label: repo.name,
-          radius: Math.max(8, Math.min(22, 8 + Math.log10(stars + 1) * 5)),
-          data: repo,
-        });
-        this._addLink(rootId, id);
-      }
-
-      // Show initial graph with repos
+      this._render();
+      await this._enrichRepos(repos, entity.login);
       this._render();
 
-      // 3. Enrichment (contributors / languages / topics)
-      const wantContribs  = document.getElementById('show-contributors').checked;
-      const wantLanguages = document.getElementById('show-languages').checked;
-      const wantTopics    = document.getElementById('show-topics').checked;
-
-      if (wantContribs || wantLanguages || wantTopics) {
-        this._setLoading(true, 'Fetching details…');
-        const expand = repos.slice(0, 12);
-
-        await Promise.allSettled(expand.map(async repo => {
-          const repoId = `repo:${repo.full_name}`;
-          const jobs   = [];
-          if (wantLanguages) jobs.push(this._enrichLanguages(repo, repoId));
-          if (wantContribs)  jobs.push(this._enrichContributors(repo, repoId, entity.login));
-          if (wantTopics)    jobs.push(this._enrichTopics(repo, repoId));
-          await Promise.allSettled(jobs);
-        }));
-
-        this._render();
-      }
-
-      // Fit after simulation has had a moment to settle
       setTimeout(() => this.graph.fitView(), 500);
 
     } catch (e) {
       this._setError(e.message);
-      if (this.nodeMap.size === 0) {
-        document.getElementById('empty-state').style.display = 'flex';
-      }
+      if (this.nodeMap.size === 0) document.getElementById('empty-state').style.display = 'flex';
     } finally {
       this.loading = false;
       this._setLoading(false);
@@ -140,7 +102,98 @@ class App {
     }
   }
 
-  // ── Enrichment helpers ─────────────────────────────────
+  // ── Additive expand (keeps existing graph intact) ──────
+
+  async _expand(username) {
+    if (this.loading) return;
+    this.loading = true;
+    this._setLoading(true, `Expanding ${username}…`);
+    this._setError('');
+
+    try {
+      const entity = await this.api.getEntity(username);
+
+      // Find the anchor node in the graph (contributor:login or user:login)
+      const anchorId =
+        this.nodeMap.has(`contributor:${entity.login}`) ? `contributor:${entity.login}` :
+        this.nodeMap.has(`user:${entity.login}`)        ? `user:${entity.login}`        :
+        this.nodeMap.has(`org:${entity.login}`)         ? `org:${entity.login}`         : null;
+
+      if (anchorId) {
+        // Upgrade the node data with the full profile and mark it expanded
+        const node = this.nodeMap.get(anchorId);
+        node.data     = entity;
+        node.expanded = true;
+        // Slightly enlarge the anchor node so the expansion is visually obvious
+        if (node.type === 'contributor') node.radius = 14;
+      } else {
+        // Node not yet in graph — add it fresh
+        const type = entity.type === 'Organization' ? 'org' : 'user';
+        const id   = `${type}:${entity.login}`;
+        this.nodeMap.set(id, {
+          id, type, label: entity.name || entity.login,
+          radius: 24, data: entity, expanded: true,
+        });
+      }
+
+      const effectiveAnchor = anchorId || (entity.type === 'Organization' ? `org:${entity.login}` : `user:${entity.login}`);
+
+      this._setLoading(true, 'Fetching repositories…');
+      const repos = await this._fetchAndAddRepos(entity, effectiveAnchor, 15);
+
+      this._render();
+      await this._enrichRepos(repos, entity.login, 8);
+      this._render();
+
+    } catch (e) {
+      this._setError(e.message);
+    } finally {
+      this.loading = false;
+      this._setLoading(false);
+      this._updateRateLimit();
+    }
+  }
+
+  // ── Shared helpers ─────────────────────────────────────
+
+  async _fetchAndAddRepos(entity, anchorId, limit = 25) {
+    const allRepos  = await this.api.getRepos(entity.login, entity.type);
+    const hideForks = document.getElementById('hide-forks').checked;
+    const repos     = allRepos.filter(r => !r.private && (!hideForks || !r.fork)).slice(0, limit);
+
+    for (const repo of repos) {
+      const id = `repo:${repo.full_name}`;
+      if (!this.nodeMap.has(id)) {
+        const stars = repo.stargazers_count || 0;
+        this.nodeMap.set(id, {
+          id, type: 'repo', label: repo.name,
+          radius: Math.max(8, Math.min(22, 8 + Math.log10(stars + 1) * 5)),
+          data: repo,
+        });
+      }
+      this._addLink(anchorId, id);
+    }
+    return repos;
+  }
+
+  async _enrichRepos(repos, skipLogin, limit = 12) {
+    const wantContribs  = document.getElementById('show-contributors').checked;
+    const wantLanguages = document.getElementById('show-languages').checked;
+    const wantTopics    = document.getElementById('show-topics').checked;
+    if (!wantContribs && !wantLanguages && !wantTopics) return;
+
+    this._setLoading(true, 'Fetching details…');
+    await Promise.allSettled(repos.slice(0, limit).map(async repo => {
+      const repoId = `repo:${repo.full_name}`;
+      const jobs   = [];
+      if (wantLanguages) jobs.push(this._enrichLanguages(repo, repoId));
+      if (wantContribs)  jobs.push(this._enrichContributors(repo, repoId, skipLogin));
+      if (wantTopics)    jobs.push(this._enrichTopics(repo, repoId));
+      await Promise.allSettled(jobs);
+    }));
+  }
+
+  // ── Enrichment ─────────────────────────────────────────
 
   async _enrichLanguages(repo, repoId) {
     const langs = await this.api.getLanguages(repo.owner.login, repo.name);
@@ -180,17 +233,47 @@ class App {
     const key = `${src}→${tgt}`;
     if (!this.linkSet.has(key)) {
       this.linkSet.add(key);
-      // Create fresh link objects each render so D3 mutation doesn't accumulate
       this.linkList.push({ _key: key, _src: src, _tgt: tgt });
     }
+  }
+
+  // ── Shared-contributor edge computation ────────────────
+
+  _computeSharedContribLinks(nodeIds) {
+    // Build map: contributorId → [repoId, ...]
+    const contribRepos = new Map();
+    for (const l of this.linkList) {
+      if (!l._tgt.startsWith('contributor:')) continue;
+      if (!nodeIds.has(l._src) || !nodeIds.has(l._tgt)) continue;
+      if (!contribRepos.has(l._tgt)) contribRepos.set(l._tgt, []);
+      contribRepos.get(l._tgt).push(l._src);
+    }
+
+    const result = [];
+    const seen   = new Set();
+    for (const repos of contribRepos.values()) {
+      if (repos.length < 2) continue;
+      for (let i = 0; i < repos.length; i++) {
+        for (let j = i + 1; j < repos.length; j++) {
+          // Canonical sort so A↔B and B↔A produce the same key
+          const [a, b] = repos[i] < repos[j] ? [repos[i], repos[j]] : [repos[j], repos[i]];
+          const key = `shared:${a}↔${b}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            result.push({ source: a, target: b, _key: key, _type: 'shared-contributor' });
+          }
+        }
+      }
+    }
+    return result;
   }
 
   // ── Render ─────────────────────────────────────────────
 
   _render() {
-    const showC = document.getElementById('show-contributors').checked;
-    const showL = document.getElementById('show-languages').checked;
-    const showT = document.getElementById('show-topics').checked;
+    const showC     = document.getElementById('show-contributors').checked;
+    const showL     = document.getElementById('show-languages').checked;
+    const showT     = document.getElementById('show-topics').checked;
     const hideForks = document.getElementById('hide-forks').checked;
 
     const visible = new Set(['user', 'org', 'repo']);
@@ -205,10 +288,13 @@ class App {
     });
     const nodeIds = new Set(nodes.map(n => n.id));
 
-    // Create fresh link objects so D3 can re-process IDs without accumulating mutations
+    // Fresh link objects each render (D3 mutates them; we don't want accumulation)
     const links = this.linkList
       .filter(l => nodeIds.has(l._src) && nodeIds.has(l._tgt))
       .map(l => ({ source: l._src, target: l._tgt, _key: l._key }));
+
+    // Shared-contributor repo↔repo edges (dashed, green)
+    if (showC) links.push(...this._computeSharedContribLinks(nodeIds));
 
     this.graph.update(nodes, links);
   }
@@ -225,12 +311,12 @@ class App {
         <div class="info-head">
           <img class="info-avatar" src="${d.avatar_url}&s=80" alt="">
           <div>
-            <div class="info-name">${d.name || d.login}</div>
-            <div class="info-login">@${d.login}</div>
+            <div class="info-name">${esc(d.name || d.login)}</div>
+            <div class="info-login">@${esc(d.login)}</div>
             <span class="badge ${node.type}">${isOrg ? 'Organization' : 'User'}</span>
           </div>
         </div>
-        ${d.bio ? `<div class="info-bio">${d.bio}</div>` : ''}
+        ${d.bio ? `<div class="info-bio">${esc(d.bio)}</div>` : ''}
         <div class="info-stats">
           <div class="stat"><div class="stat-val">${fmt(d.public_repos)}</div><div class="stat-lbl">Repos</div></div>
           <div class="stat"><div class="stat-val">${fmt(d.followers)}</div><div class="stat-lbl">Followers</div></div>
@@ -249,7 +335,7 @@ class App {
             <div class="info-name">${esc(d.name)}</div>
             <div class="info-login">${esc(d.full_name)}</div>
             <span class="badge repo">Repository</span>
-            ${d.fork ? ' <span class="badge" style="background:rgba(255,166,87,.14);color:var(--topic)">Fork</span>' : ''}
+            ${d.fork ? ` <span class="badge" style="background:rgba(255,166,87,.14);color:var(--topic)">Fork</span>` : ''}
           </div>
         </div>
         ${d.description ? `<div class="info-bio">${esc(d.description)}</div>` : ''}
@@ -258,7 +344,7 @@ class App {
           <div class="stat"><div class="stat-val">🍴 ${fmt(d.forks_count)}</div><div class="stat-lbl">Forks</div></div>
           ${d.open_issues_count ? `<div class="stat"><div class="stat-val">${fmt(d.open_issues_count)}</div><div class="stat-lbl">Issues</div></div>` : ''}
         </div>
-        ${d.language ? `<div class="info-meta"><span class="lang-pip" style="background:var(--language)"></span>${esc(d.language)}</div>` : ''}
+        ${d.language   ? `<div class="info-meta"><span class="lang-pip" style="background:var(--language)"></span>${esc(d.language)}</div>` : ''}
         ${d.license?.spdx_id ? `<div class="info-meta">📄 ${esc(d.license.spdx_id)}</div>` : ''}
         ${d.topics?.length ? `<div class="info-topics">${d.topics.slice(0,6).map(t => `<span class="topic-chip">${esc(t)}</span>`).join('')}</div>` : ''}
         <a class="info-link" href="${d.html_url}" target="_blank" rel="noopener">View on GitHub →</a>
@@ -270,13 +356,18 @@ class App {
           <div>
             <div class="info-name">${esc(d.login)}</div>
             <span class="badge contributor">Contributor</span>
+            ${node.expanded ? `<span class="expanded-badge">expanded</span>` : ''}
           </div>
         </div>
         <div class="info-stats">
           <div class="stat"><div class="stat-val">${fmt(d.contributions)}</div><div class="stat-lbl">Commits</div></div>
         </div>
         <a class="info-link" href="https://github.com/${encodeURIComponent(d.login)}" target="_blank" rel="noopener">View on GitHub →</a>
-        <button class="explore-btn" data-login="${esc(d.login)}">🔍 Explore ${esc(d.login)}'s graph</button>
+        <div class="action-row">
+          <button class="action-btn expand" data-login="${esc(d.login)}">➕ Expand into graph</button>
+          <button class="action-btn search"  data-login="${esc(d.login)}">🔍 New search</button>
+        </div>
+        <div class="action-hint">or double-click the node to expand</div>
       `;
     } else if (node.type === 'language') {
       html = `
@@ -304,9 +395,13 @@ class App {
     document.getElementById('info-content').innerHTML = html;
     document.getElementById('info-panel').classList.add('visible');
 
-    // Wire explore button dynamically (avoids inline onclick)
-    const expBtn = document.querySelector('.explore-btn');
-    if (expBtn) expBtn.addEventListener('click', () => this._search(expBtn.dataset.login));
+    // Wire action buttons — done here to avoid inline onclick (XSS-safe)
+    document.querySelector('.action-btn.expand')?.addEventListener('click', e =>
+      this._expand(e.currentTarget.dataset.login)
+    );
+    document.querySelector('.action-btn.search')?.addEventListener('click', e =>
+      this._search(e.currentTarget.dataset.login)
+    );
   }
 
   _hideInfo() {
@@ -331,12 +426,11 @@ class App {
   _updateRateLimit() {
     const n   = this.api.rateLimitRemaining;
     const col = n < 10 ? '#f85149' : n < 25 ? '#ffa657' : '#484f58';
-    document.getElementById('rate-display').innerHTML =
-      `<span style="color:${col}">${n}</span>/60 API`;
+    document.getElementById('rate-display').innerHTML = `<span style="color:${col}">${n}</span>/60 API`;
   }
 }
 
-// ── Utility ────────────────────────────────────────────
+// ── Utilities ──────────────────────────────────────────
 
 function fmt(n) { return (n ?? 0).toLocaleString(); }
 
@@ -347,7 +441,7 @@ function esc(s) {
 }
 
 function href(url) {
-  return url.startsWith('http') ? url : 'https://' + url;
+  return String(url).startsWith('http') ? url : 'https://' + url;
 }
 
 // ── Boot ───────────────────────────────────────────────

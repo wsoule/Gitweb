@@ -409,6 +409,75 @@ main {
 .dot.language    { background: var(--language); }
 .dot.topic       { background: var(--topic); }
 
+/* ── LEGEND EDGE INDICATORS ─────────────────────────── */
+.edge-solid, .edge-dashed {
+  display: inline-block;
+  width: 22px; height: 2px;
+  flex-shrink: 0;
+  border-radius: 1px;
+}
+.edge-solid  { background: rgba(255,255,255,0.3); }
+.edge-dashed {
+  background: none;
+  border-top: 2px dashed rgba(63,185,80,0.55);
+  height: 0;
+  margin-top: 1px;
+}
+
+/* ── EXPANDED BADGE ─────────────────────────────────── */
+.expanded-badge {
+  display: inline-block;
+  font-size: 9px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .5px;
+  padding: 1px 6px;
+  border-radius: 20px;
+  background: rgba(63,185,80,.2);
+  color: var(--contributor);
+  margin-left: 4px;
+  vertical-align: middle;
+}
+
+/* ── ACTION BUTTONS (expand / new search) ───────────── */
+.action-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}
+.action-btn {
+  flex: 1;
+  padding: 7px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  font-size: 11px;
+  cursor: pointer;
+  text-align: center;
+  transition: background .15s, border-color .15s, color .15s;
+}
+.action-btn.expand {
+  background: rgba(63,185,80,.1);
+  color: var(--contributor);
+  border-color: rgba(63,185,80,.3);
+}
+.action-btn.expand:hover {
+  background: rgba(63,185,80,.2);
+  border-color: var(--contributor);
+}
+.action-btn.search {
+  background: var(--surface2);
+  color: var(--muted);
+}
+.action-btn.search:hover {
+  background: rgba(88,166,255,.1);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.action-hint {
+  font-size: 10px;
+  color: var(--dim);
+  text-align: center;
+  margin-top: 5px;
+}
+
 /* ── ZOOM CONTROLS ──────────────────────────────────── */
 #controls {
   position: absolute;
