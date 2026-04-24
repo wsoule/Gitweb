@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GitHub Graph Visualizer</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header>
+    <div class="logo">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+        <circle cx="12" cy="12" r="4" fill="#58a6ff"/>
+        <circle cx="4"  cy="6"  r="2.5" fill="#3fb950" opacity="0.8"/>
+        <circle cx="20" cy="6"  r="2.5" fill="#bc8cff" opacity="0.8"/>
+        <circle cx="4"  cy="18" r="2.5" fill="#ffa657" opacity="0.8"/>
+        <circle cx="20" cy="18" r="2.5" fill="#3fb950" opacity="0.8"/>
+        <line x1="12" y1="12" x2="4"  y2="6"  stroke="#58a6ff" stroke-width="1" opacity="0.4"/>
+        <line x1="12" y1="12" x2="20" y2="6"  stroke="#58a6ff" stroke-width="1" opacity="0.4"/>
+        <line x1="12" y1="12" x2="4"  y2="18" stroke="#58a6ff" stroke-width="1" opacity="0.4"/>
+        <line x1="12" y1="12" x2="20" y2="18" stroke="#58a6ff" stroke-width="1" opacity="0.4"/>
+      </svg>
+      <span>GitHub <strong>Graph</strong></span>
+    </div>
+
+    <div class="search-wrapper">
+      <input type="text" id="search" placeholder="Enter a GitHub username or organization…" autocomplete="off" spellcheck="false">
+      <button id="search-btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+        </svg>
+        Explore
+      </button>
+    </div>
+
+    <div class="toolbar">
+      <label class="cb-label" title="Show contributor nodes">
+        <input type="checkbox" id="show-contributors" checked>
+        <span class="dot contributor"></span>Contributors
+      </label>
+      <label class="cb-label" title="Show language nodes">
+        <input type="checkbox" id="show-languages" checked>
+        <span class="dot language"></span>Languages
+      </label>
+      <label class="cb-label" title="Show topic/tag nodes">
+        <input type="checkbox" id="show-topics">
+        <span class="dot topic"></span>Topics
+      </label>
+      <div class="sep"></div>
+      <label class="cb-label" title="Hide forked repositories">
+        <input type="checkbox" id="hide-forks" checked>
+        Hide forks
+      </label>
+      <div class="sep"></div>
+      <input type="password" id="token" placeholder="GitHub token (optional)" title="Personal access token — raises rate limit from 60 to 5000 req/hr">
+    </div>
+  </header>
+
+  <main>
+    <div id="canvas">
+      <svg id="graph"></svg>
+
+      <!-- Empty / welcome state -->
+      <div id="empty-state">
+        <div class="empty-icon">
+          <svg width="90" height="90" viewBox="0 0 90 90" fill="none">
+            <circle cx="45" cy="45" r="10" fill="#58a6ff" opacity="0.9"/>
+            <circle cx="15" cy="22" r="6"  fill="#3fb950" opacity="0.75"/>
+            <circle cx="75" cy="22" r="6"  fill="#bc8cff" opacity="0.75"/>
+            <circle cx="15" cy="68" r="6"  fill="#ffa657" opacity="0.75"/>
+            <circle cx="75" cy="68" r="6"  fill="#3fb950" opacity="0.75"/>
+            <circle cx="45" cy="8"  r="4.5" fill="#58a6ff" opacity="0.55"/>
+            <circle cx="45" cy="82" r="4.5" fill="#ffa657" opacity="0.55"/>
+            <line x1="45" y1="45" x2="15" y2="22" stroke="#58a6ff" stroke-width="1.2" opacity="0.35"/>
+            <line x1="45" y1="45" x2="75" y2="22" stroke="#58a6ff" stroke-width="1.2" opacity="0.35"/>
+            <line x1="45" y1="45" x2="15" y2="68" stroke="#58a6ff" stroke-width="1.2" opacity="0.35"/>
+            <line x1="45" y1="45" x2="75" y2="68" stroke="#58a6ff" stroke-width="1.2" opacity="0.35"/>
+            <line x1="45" y1="45" x2="45" y2="8"  stroke="#58a6ff" stroke-width="1.2" opacity="0.35"/>
+            <line x1="45" y1="45" x2="45" y2="82" stroke="#58a6ff" stroke-width="1.2" opacity="0.35"/>
+          </svg>
+        </div>
+        <h2>Explore GitHub Networks</h2>
+        <p>Enter a username or organization to visualize their repository graph</p>
+        <div class="examples">
+          <span>Try:</span>
+          <button class="ex-btn" data-user="torvalds">torvalds</button>
+          <button class="ex-btn" data-user="microsoft">microsoft</button>
+          <button class="ex-btn" data-user="vercel">vercel</button>
+          <button class="ex-btn" data-user="facebook">facebook</button>
+        </div>
+      </div>
+
+      <!-- Loading overlay -->
+      <div id="loading">
+        <div class="spinner"></div>
+        <span id="loading-text">Loading…</span>
+      </div>
+
+      <!-- Error banner -->
+      <div id="error-banner"></div>
+
+      <!-- Side info panel -->
+      <div id="info-panel">
+        <button id="info-close" title="Close">✕</button>
+        <div id="info-content"></div>
+      </div>
+
+      <!-- Legend -->
+      <div id="legend">
+        <div class="legend-title">Node types</div>
+        <div class="legend-row"><span class="dot user"></span>User / Org</div>
+        <div class="legend-row"><span class="dot repo"></span>Repository</div>
+        <div class="legend-row"><span class="dot contributor"></span>Contributor</div>
+        <div class="legend-row"><span class="dot language"></span>Language</div>
+        <div class="legend-row"><span class="dot topic"></span>Topic</div>
+        <div class="legend-hint">Drag nodes · Scroll to zoom<br>Click node for details<br>Double-click user to explore</div>
+      </div>
+
+      <!-- Zoom controls -->
+      <div id="controls">
+        <button id="zoom-in"  title="Zoom in">+</button>
+        <button id="zoom-out" title="Zoom out">−</button>
+        <button id="fit-btn"  title="Fit graph to view">⊡</button>
+        <div class="ctrl-sep"></div>
+        <span id="rate-display"></span>
+      </div>
+    </div>
+  </main>
+
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/graph.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
