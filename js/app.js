@@ -201,8 +201,9 @@ class App {
       const contributors = await this.api.getContributors(repo.owner.login, repo.name);
       for (const c of contributors) {
         if (c.type === 'Bot') continue;
-        const id = `contributor:${c.login}`;
-        if (!this.nodeMap.has(id)) {
+        const existing = this._resolvePersonId(c.login);
+        const id = existing || `contributor:${c.login}`;
+        if (!existing) {
           this.nodeMap.set(id, { id, type: 'contributor', label: c.login, radius: 9, data: c });
         }
         this._addLink(repoId, id);
@@ -269,14 +270,23 @@ class App {
         const list = await this.api.getContributors(repo.owner.login, repo.name);
         for (const c of list) {
           if (c.login === skipLogin || c.type === 'Bot') continue;
-          const id = `contributor:${c.login}`;
-          if (!this.nodeMap.has(id)) {
+          const existing = this._resolvePersonId(c.login);
+          const id = existing || `contributor:${c.login}`;
+          if (!existing) {
             this.nodeMap.set(id, { id, type: 'contributor', label: c.login, radius: 9, data: c });
           }
           this._addLink(repoId, id);
         }
       } catch { /* swallow per-repo failures */ }
     }));
+  }
+
+  // Return the existing node ID for a login, regardless of type prefix
+  _resolvePersonId(login) {
+    for (const prefix of ['user:', 'org:', 'contributor:']) {
+      if (this.nodeMap.has(prefix + login)) return prefix + login;
+    }
+    return null;
   }
 
   _addLink(src, tgt) {
