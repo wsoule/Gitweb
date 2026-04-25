@@ -54,26 +54,30 @@ class GitGraph {
     this.linkLayer = this.root.append('g').attr('class', 'links');
     this.nodeLayer = this.root.append('g').attr('class', 'nodes');
 
+    this.paused = false;
+
     this.simulation = d3.forceSimulation()
+      .alphaDecay(0.04)
+      .velocityDecay(0.45)
       .force('link', d3.forceLink()
         .id(d => d.id)
         .distance(l => {
-          if (l._type === 'shared-contributor') return 65;
+          if (l._type === 'shared-contributor') return 100;
           const st = l.source?.type || l.source;
-          if (st === 'user' || st === 'org') return 180;
-          return 95;
+          if (st === 'user' || st === 'org') return 250;
+          return 140;
         })
-        .strength(l => l._type === 'shared-contributor' ? 0.1 : 0.35)
+        .strength(l => l._type === 'shared-contributor' ? 0.04 : 0.12)
       )
       .force('charge', d3.forceManyBody()
         .strength(d => {
-          if (d.type === 'user' || d.type === 'org') return -700;
-          if (d.type === 'repo')                     return -320;
-          return -180;
+          if (d.type === 'user' || d.type === 'org') return -500;
+          if (d.type === 'repo')                     return -200;
+          return -100;
         })
       )
-      .force('center',  d3.forceCenter(this.W / 2, this.H / 2))
-      .force('collide', d3.forceCollide().radius(d => d.radius + 10).strength(0.85))
+      .force('center',  d3.forceCenter(this.W / 2, this.H / 2).strength(0.03))
+      .force('collide', d3.forceCollide().radius(d => d.radius + 6).strength(0.5))
       .on('tick', () => this._tick());
   }
 
@@ -185,7 +189,8 @@ class GitGraph {
     // Restart simulation — D3 mutates link.source / link.target to node refs
     this.simulation.nodes(nodes);
     this.simulation.force('link').links(links);
-    this.simulation.alpha(0.45).restart();
+    this.paused = false;
+    this.simulation.alpha(0.3).restart();
   }
 
   _tick() {
@@ -253,6 +258,16 @@ class GitGraph {
 
   zoomBy(factor) {
     d3.select(this.svgEl).transition().duration(220).call(this.zoom.scaleBy, factor);
+  }
+
+  togglePause() {
+    this.paused = !this.paused;
+    if (this.paused) {
+      this.simulation.stop();
+    } else {
+      this.simulation.alpha(0.15).restart();
+    }
+    return this.paused;
   }
 }
 

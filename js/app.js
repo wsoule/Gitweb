@@ -48,6 +48,10 @@ class App {
     document.getElementById('zoom-in') .addEventListener('click', () => this.graph.zoomBy(1.45));
     document.getElementById('zoom-out').addEventListener('click', () => this.graph.zoomBy(0.69));
     document.getElementById('fit-btn') .addEventListener('click', () => this.graph.fitView());
+    document.getElementById('pause-btn').addEventListener('click', () => {
+      const paused = this.graph.togglePause();
+      document.getElementById('pause-btn').textContent = paused ? '▶' : '⏸';
+    });
     document.getElementById('info-close').addEventListener('click', () => { this._hideInfo(); this.graph._deselect(); });
 
     document.querySelectorAll('.ex-btn').forEach(btn =>
