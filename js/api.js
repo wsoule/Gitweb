@@ -1,77 +1,161 @@
 class GitHubAPI {
   constructor() {
-    this.base = 'https://api.github.com';
-    this.token = null;
-    this.rateLimitRemaining = 60;
-    this.rateLimitReset = null;
+    this.graphqlUrl = 'https://api.github.com/graphql';
+    this.restUrl    = 'https://api.github.com';
+    this.token      = null;
+    this.rateLimitRemaining = null;
   }
 
   setToken(token) {
     this.token = token ? token.trim() : null;
   }
 
-  _headers(extraAccept) {
-    const h = { 'Accept': extraAccept || 'application/vnd.github.v3+json' };
-    if (this.token) h['Authorization'] = `Bearer ${this.token}`;
-    return h;
+  _trackRate(res) {
+    const r = res.headers.get('X-RateLimit-Remaining');
+    if (r !== null) this.rateLimitRemaining = parseInt(r, 10);
   }
 
-  async _fetch(path, extraAccept) {
-    const res = await fetch(this.base + path, { headers: this._headers(extraAccept) });
+  // ── GraphQL ───────────────────────────────────────────
 
-    const remaining = res.headers.get('X-RateLimit-Remaining');
-    if (remaining !== null) this.rateLimitRemaining = parseInt(remaining, 10);
-    const reset = res.headers.get('X-RateLimit-Reset');
-    if (reset) this.rateLimitReset = new Date(parseInt(reset, 10) * 1000);
-
-    if (res.status === 404) throw new Error(`Not found: ${path}`);
-    if (res.status === 403) {
-      const body = await res.json().catch(() => ({}));
-      const msg = body.message || '';
-      if (msg.includes('rate limit')) {
-        const resetAt = this.rateLimitReset ? ` Resets at ${this.rateLimitReset.toLocaleTimeString()}.` : '';
-        throw new Error(`Rate limit exceeded.${resetAt} Add a GitHub token to get 5000 req/hr.`);
-      }
-      throw new Error(`GitHub API 403: ${msg}`);
+  async _gql(query, variables = {}) {
+    if (!this.token) {
+      throw new Error('A GitHub token is required. Create one at Settings → Developer settings → Personal access tokens (no scopes needed for public data).');
     }
+
+    const res = await fetch(this.graphqlUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.token}`,
+        'Content-Type':  'application/json',
+      },
+      body: JSON.stringify({ query, variables }),
+    });
+
+    this._trackRate(res);
+
+    if (res.status === 401) throw new Error('Invalid or expired GitHub token.');
     if (!res.ok) throw new Error(`GitHub API ${res.status}: ${res.statusText}`);
+
+    const json = await res.json();
+    if (json.errors?.length) throw new Error(json.errors[0].message);
+    return json.data;
+  }
+
+  // ── REST (contributors only — no GraphQL equivalent) ──
+
+  async _rest(path) {
+    const headers = { 'Accept': 'application/vnd.github.v3+json' };
+    if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
+
+    const res = await fetch(this.restUrl + path, { headers });
+    this._trackRate(res);
+
+    if (res.status === 404) return [];
+    if (res.status === 403) return [];
+    if (!res.ok) throw new Error(`GitHub API ${res.status}`);
     return res.json();
   }
 
-  async getEntity(name) {
-    // Try user first, fall back to org
-    try {
-      return await this._fetch(`/users/${encodeURIComponent(name)}`);
-    } catch (e) {
-      if (e.message.startsWith('Not found')) {
-        return await this._fetch(`/orgs/${encodeURIComponent(name)}`);
+  // ── Profile + repos (single GraphQL call) ─────────────
+
+  async fetchProfile(login) {
+    const query = `
+      query ($login: String!) {
+        repositoryOwner(login: $login) {
+          login
+          avatarUrl
+          url
+          ... on User {
+            __typename
+            name
+            bio
+            location
+            websiteUrl
+            email
+            followers  { totalCount }
+            following  { totalCount }
+          }
+          ... on Organization {
+            __typename
+            name
+            description
+            location
+            websiteUrl
+            email
+            membersWithRole { totalCount }
+          }
+          repositories(
+            first: 100
+            orderBy: { field: STARGAZERS, direction: DESC }
+            privacy: PUBLIC
+          ) {
+            nodes {
+              name
+              nameWithOwner
+              description
+              stargazerCount
+              forkCount
+              isFork
+              isPrivate
+              url
+              owner { login avatarUrl }
+              licenseInfo { spdxId }
+              primaryLanguage { name }
+              languages(first: 20)        { nodes { name } }
+              repositoryTopics(first: 30) { nodes { topic { name } } }
+              issues(states: OPEN)        { totalCount }
+            }
+          }
+        }
       }
-      throw e;
-    }
+    `;
+
+    const data  = await this._gql(query, { login });
+    const owner = data.repositoryOwner;
+    if (!owner) throw new Error(`"${login}" not found.`);
+
+    const isOrg = owner.__typename === 'Organization';
+
+    const entity = {
+      login:        owner.login,
+      name:         owner.name || owner.login,
+      type:         isOrg ? 'Organization' : 'User',
+      bio:          owner.bio || owner.description || '',
+      avatar_url:   owner.avatarUrl,
+      html_url:     owner.url,
+      location:     owner.location,
+      blog:         owner.websiteUrl,
+      email:        owner.email,
+      public_repos: owner.repositories?.nodes?.length || 0,
+      followers:    owner.followers?.totalCount ?? owner.membersWithRole?.totalCount ?? 0,
+      following:    owner.following?.totalCount ?? null,
+    };
+
+    const repos = (owner.repositories?.nodes || []).map(r => ({
+      name:               r.name,
+      full_name:          r.nameWithOwner,
+      description:        r.description,
+      stargazers_count:   r.stargazerCount,
+      forks_count:        r.forkCount,
+      fork:               r.isFork,
+      private:            r.isPrivate,
+      html_url:           r.url,
+      owner:              r.owner,
+      license:            r.licenseInfo ? { spdx_id: r.licenseInfo.spdxId } : null,
+      language:           r.primaryLanguage?.name || null,
+      open_issues_count:  r.issues?.totalCount || 0,
+      languages:          r.languages?.nodes?.map(l => l.name) || [],
+      topics:             r.repositoryTopics?.nodes?.map(t => t.topic.name) || [],
+    }));
+
+    return { entity, repos };
   }
 
-  getRepos(login, type, page = 1) {
-    const base = type === 'Organization' ? `/orgs/${login}` : `/users/${login}`;
-    return this._fetch(`${base}/repos?per_page=30&sort=stars&direction=desc&page=${page}`);
-  }
+  // ── Contributors (REST — no GraphQL equivalent) ───────
 
   getContributors(owner, repo) {
-    return this._fetch(`/repos/${owner}/${repo}/contributors?per_page=8&anon=false`);
-  }
-
-  getLanguages(owner, repo) {
-    return this._fetch(`/repos/${owner}/${repo}/languages`);
-  }
-
-  async getTopics(owner, repo) {
-    try {
-      const data = await this._fetch(
-        `/repos/${owner}/${repo}/topics`,
-        'application/vnd.github.mercy-preview+json'
-      );
-      return data.names || [];
-    } catch {
-      return [];
-    }
+    return this._rest(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contributors?per_page=100&anon=false`
+    );
   }
 }

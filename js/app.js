@@ -79,7 +79,7 @@ class App {
     history.replaceState({}, '', url);
 
     try {
-      const entity = await this.api.getEntity(username);
+      const { entity, repos } = await this.api.fetchProfile(username);
       const type   = entity.type === 'Organization' ? 'org' : 'user';
       const rootId = `${type}:${entity.login}`;
 
@@ -88,12 +88,14 @@ class App {
         radius: 28, data: entity,
       });
 
-      this._setLoading(true, 'Fetching repositories…');
-      const repos = await this._fetchAndAddRepos(entity, rootId);
+      this._processRepos(repos, rootId);
+      this._render();
 
-      this._render();
-      await this._enrichRepos(repos, entity.login);
-      this._render();
+      // Fetch contributors if checkbox is on
+      if (document.getElementById('show-contributors').checked) {
+        await this._fetchContributors(repos, entity.login);
+        this._render();
+      }
 
       setTimeout(() => this.graph.fitView(), 500);
 
@@ -116,23 +118,20 @@ class App {
     this._setError('');
 
     try {
-      const entity = await this.api.getEntity(username);
+      const { entity, repos } = await this.api.fetchProfile(username);
 
-      // Find the anchor node in the graph (contributor:login or user:login)
+      // Find the anchor node in the graph
       const anchorId =
         this.nodeMap.has(`contributor:${entity.login}`) ? `contributor:${entity.login}` :
         this.nodeMap.has(`user:${entity.login}`)        ? `user:${entity.login}`        :
         this.nodeMap.has(`org:${entity.login}`)         ? `org:${entity.login}`         : null;
 
       if (anchorId) {
-        // Upgrade the node data with the full profile and mark it expanded
         const node = this.nodeMap.get(anchorId);
         node.data     = entity;
         node.expanded = true;
-        // Slightly enlarge the anchor node so the expansion is visually obvious
         if (node.type === 'contributor') node.radius = 14;
       } else {
-        // Node not yet in graph — add it fresh
         const type = entity.type === 'Organization' ? 'org' : 'user';
         const id   = `${type}:${entity.login}`;
         this.nodeMap.set(id, {
@@ -143,12 +142,13 @@ class App {
 
       const effectiveAnchor = anchorId || (entity.type === 'Organization' ? `org:${entity.login}` : `user:${entity.login}`);
 
-      this._setLoading(true, 'Fetching repositories…');
-      const repos = await this._fetchAndAddRepos(entity, effectiveAnchor, 15);
+      this._processRepos(repos, effectiveAnchor);
+      this._render();
 
-      this._render();
-      await this._enrichRepos(repos, entity.login, 8);
-      this._render();
+      if (document.getElementById('show-contributors').checked) {
+        await this._fetchContributors(repos, entity.login);
+        this._render();
+      }
 
     } catch (e) {
       this._setError(e.message);
@@ -172,43 +172,33 @@ class App {
       node.expanded = true;
       node.radius = Math.max(node.radius, 16);
       const repoId = node.id;
-      const owner  = repo.owner.login;
 
-      const [langs, contribs, topics] = await Promise.allSettled([
-        this.api.getLanguages(owner, repo.name),
-        this.api.getContributors(owner, repo.name),
-        this.api.getTopics(owner, repo.name),
-      ]);
-
-      if (langs.status === 'fulfilled') {
-        for (const lang of Object.keys(langs.value).slice(0, 5)) {
-          const id = `lang:${lang}`;
-          if (!this.nodeMap.has(id)) {
-            this.nodeMap.set(id, { id, type: 'language', label: lang, radius: 7, data: { name: lang } });
-          }
-          this._addLink(repoId, id);
+      // Languages and topics are already in node.data from the GraphQL fetch
+      for (const lang of repo.languages || []) {
+        const id = `lang:${lang}`;
+        if (!this.nodeMap.has(id)) {
+          this.nodeMap.set(id, { id, type: 'language', label: lang, radius: 7, data: { name: lang } });
         }
+        this._addLink(repoId, id);
       }
 
-      if (contribs.status === 'fulfilled') {
-        for (const c of contribs.value.slice(0, 6)) {
-          if (c.type === 'Bot') continue;
-          const id = `contributor:${c.login}`;
-          if (!this.nodeMap.has(id)) {
-            this.nodeMap.set(id, { id, type: 'contributor', label: c.login, radius: 9, data: c });
-          }
-          this._addLink(repoId, id);
+      for (const topic of repo.topics || []) {
+        const id = `topic:${topic}`;
+        if (!this.nodeMap.has(id)) {
+          this.nodeMap.set(id, { id, type: 'topic', label: topic, radius: 7, data: { name: topic } });
         }
+        this._addLink(repoId, id);
       }
 
-      if (topics.status === 'fulfilled') {
-        for (const topic of topics.value.slice(0, 5)) {
-          const id = `topic:${topic}`;
-          if (!this.nodeMap.has(id)) {
-            this.nodeMap.set(id, { id, type: 'topic', label: topic, radius: 7, data: { name: topic } });
-          }
-          this._addLink(repoId, id);
+      // Contributors via REST (no GraphQL equivalent)
+      const contributors = await this.api.getContributors(repo.owner.login, repo.name);
+      for (const c of contributors) {
+        if (c.type === 'Bot') continue;
+        const id = `contributor:${c.login}`;
+        if (!this.nodeMap.has(id)) {
+          this.nodeMap.set(id, { id, type: 'contributor', label: c.login, radius: 9, data: c });
         }
+        this._addLink(repoId, id);
       }
 
       this._render();
@@ -223,12 +213,13 @@ class App {
 
   // ── Shared helpers ─────────────────────────────────────
 
-  async _fetchAndAddRepos(entity, anchorId, limit = 25) {
-    const allRepos  = await this.api.getRepos(entity.login, entity.type);
+  _processRepos(repos, anchorId) {
     const hideForks = document.getElementById('hide-forks').checked;
-    const repos     = allRepos.filter(r => !r.private && (!hideForks || !r.fork)).slice(0, limit);
 
     for (const repo of repos) {
+      if (repo.private) continue;
+      if (hideForks && repo.fork) continue;
+
       const id = `repo:${repo.full_name}`;
       if (!this.nodeMap.has(id)) {
         const stars = repo.stargazers_count || 0;
@@ -239,61 +230,46 @@ class App {
         });
       }
       this._addLink(anchorId, id);
+
+      // Languages (already in repo data from GraphQL)
+      for (const lang of repo.languages || []) {
+        const langId = `lang:${lang}`;
+        if (!this.nodeMap.has(langId)) {
+          this.nodeMap.set(langId, { id: langId, type: 'language', label: lang, radius: 7, data: { name: lang } });
+        }
+        this._addLink(id, langId);
+      }
+
+      // Topics (already in repo data from GraphQL)
+      for (const topic of repo.topics || []) {
+        const topicId = `topic:${topic}`;
+        if (!this.nodeMap.has(topicId)) {
+          this.nodeMap.set(topicId, { id: topicId, type: 'topic', label: topic, radius: 7, data: { name: topic } });
+        }
+        this._addLink(id, topicId);
+      }
     }
-    return repos;
   }
 
-  async _enrichRepos(repos, skipLogin, limit = 12) {
-    const wantContribs  = document.getElementById('show-contributors').checked;
-    const wantLanguages = document.getElementById('show-languages').checked;
-    const wantTopics    = document.getElementById('show-topics').checked;
-    if (!wantContribs && !wantLanguages && !wantTopics) return;
+  async _fetchContributors(repos, skipLogin) {
+    this._setLoading(true, 'Fetching contributors…');
+    const visible = repos.filter(r => !r.private);
 
-    this._setLoading(true, 'Fetching details…');
-    await Promise.allSettled(repos.slice(0, limit).map(async repo => {
+    await Promise.allSettled(visible.map(async repo => {
       const repoId = `repo:${repo.full_name}`;
-      const jobs   = [];
-      if (wantLanguages) jobs.push(this._enrichLanguages(repo, repoId));
-      if (wantContribs)  jobs.push(this._enrichContributors(repo, repoId, skipLogin));
-      if (wantTopics)    jobs.push(this._enrichTopics(repo, repoId));
-      await Promise.allSettled(jobs);
+      if (!this.nodeMap.has(repoId)) return;
+      try {
+        const list = await this.api.getContributors(repo.owner.login, repo.name);
+        for (const c of list) {
+          if (c.login === skipLogin || c.type === 'Bot') continue;
+          const id = `contributor:${c.login}`;
+          if (!this.nodeMap.has(id)) {
+            this.nodeMap.set(id, { id, type: 'contributor', label: c.login, radius: 9, data: c });
+          }
+          this._addLink(repoId, id);
+        }
+      } catch { /* swallow per-repo failures */ }
     }));
-  }
-
-  // ── Enrichment ─────────────────────────────────────────
-
-  async _enrichLanguages(repo, repoId) {
-    const langs = await this.api.getLanguages(repo.owner.login, repo.name);
-    for (const lang of Object.keys(langs).slice(0, 3)) {
-      const id = `lang:${lang}`;
-      if (!this.nodeMap.has(id)) {
-        this.nodeMap.set(id, { id, type: 'language', label: lang, radius: 7, data: { name: lang } });
-      }
-      this._addLink(repoId, id);
-    }
-  }
-
-  async _enrichContributors(repo, repoId, skipLogin) {
-    const list = await this.api.getContributors(repo.owner.login, repo.name);
-    for (const c of list.slice(0, 4)) {
-      if (c.login === skipLogin || c.type === 'Bot') continue;
-      const id = `contributor:${c.login}`;
-      if (!this.nodeMap.has(id)) {
-        this.nodeMap.set(id, { id, type: 'contributor', label: c.login, radius: 9, data: c });
-      }
-      this._addLink(repoId, id);
-    }
-  }
-
-  async _enrichTopics(repo, repoId) {
-    const topics = await this.api.getTopics(repo.owner.login, repo.name);
-    for (const topic of topics.slice(0, 4)) {
-      const id = `topic:${topic}`;
-      if (!this.nodeMap.has(id)) {
-        this.nodeMap.set(id, { id, type: 'topic', label: topic, radius: 7, data: { name: topic } });
-      }
-      this._addLink(repoId, id);
-    }
   }
 
   _addLink(src, tgt) {
@@ -307,7 +283,6 @@ class App {
   // ── Shared-contributor edge computation ────────────────
 
   _computeSharedContribLinks(nodeIds) {
-    // Build map: contributorId → [repoId, ...]
     const contribRepos = new Map();
     for (const l of this.linkList) {
       if (!l._tgt.startsWith('contributor:')) continue;
@@ -322,7 +297,6 @@ class App {
       if (repos.length < 2) continue;
       for (let i = 0; i < repos.length; i++) {
         for (let j = i + 1; j < repos.length; j++) {
-          // Canonical sort so A↔B and B↔A produce the same key
           const [a, b] = repos[i] < repos[j] ? [repos[i], repos[j]] : [repos[j], repos[i]];
           const key = `shared:${a}↔${b}`;
           if (!seen.has(key)) {
@@ -367,18 +341,18 @@ class App {
     });
     const nodeIds = new Set(nodes.map(n => n.id));
 
-    // Fresh link objects each render (D3 mutates them; we don't want accumulation)
     const links = this.linkList
       .filter(l => nodeIds.has(l._src) && nodeIds.has(l._tgt))
       .map(l => ({ source: l._src, target: l._tgt, _key: l._key }));
 
-    // Shared-contributor repo↔repo edges (dashed, green)
     if (showC) links.push(...this._computeSharedContribLinks(nodeIds));
 
     this.graph.update(nodes, links);
   }
 
   // ── Info panel ─────────────────────────────────────────
+  // NOTE: innerHTML usage below is safe — all dynamic values pass through
+  // the esc() sanitizer which escapes &, <, >, and " characters.
 
   _showInfo(node) {
     const d = node.data;
@@ -388,7 +362,7 @@ class App {
       const isOrg = node.type === 'org';
       html = `
         <div class="info-head">
-          <img class="info-avatar" src="${d.avatar_url}&s=80" alt="">
+          <img class="info-avatar" src="${esc(d.avatar_url)}&s=80" alt="">
           <div>
             <div class="info-name">${esc(d.name || d.login)}</div>
             <div class="info-login">@${esc(d.login)}</div>
@@ -401,15 +375,14 @@ class App {
           <div class="stat"><div class="stat-val">${fmt(d.followers)}</div><div class="stat-lbl">Followers</div></div>
           ${d.following != null ? `<div class="stat"><div class="stat-val">${fmt(d.following)}</div><div class="stat-lbl">Following</div></div>` : ''}
         </div>
-        ${d.location ? `<div class="info-meta">📍 ${esc(d.location)}</div>` : ''}
-        ${d.blog     ? `<div class="info-meta">🔗 <a href="${href(d.blog)}" target="_blank" rel="noopener">${esc(d.blog)}</a></div>` : ''}
-        ${d.email    ? `<div class="info-meta">✉ ${esc(d.email)}</div>` : ''}
-        <a class="info-link" href="${d.html_url}" target="_blank" rel="noopener">View on GitHub →</a>
+        ${d.location ? `<div class="info-meta">${esc(d.location)}</div>` : ''}
+        ${d.blog     ? `<div class="info-meta"><a href="${esc(href(d.blog))}" target="_blank" rel="noopener">${esc(d.blog)}</a></div>` : ''}
+        ${d.email    ? `<div class="info-meta">${esc(d.email)}</div>` : ''}
+        <a class="info-link" href="${esc(d.html_url)}" target="_blank" rel="noopener">View on GitHub</a>
       `;
     } else if (node.type === 'repo') {
       html = `
         <div class="info-head">
-          <div class="info-icon">📦</div>
           <div>
             <div class="info-name">${esc(d.name)}</div>
             <div class="info-login">${esc(d.full_name)}</div>
@@ -419,20 +392,20 @@ class App {
         </div>
         ${d.description ? `<div class="info-bio">${esc(d.description)}</div>` : ''}
         <div class="info-stats">
-          <div class="stat"><div class="stat-val">⭐ ${fmt(d.stargazers_count)}</div><div class="stat-lbl">Stars</div></div>
-          <div class="stat"><div class="stat-val">🍴 ${fmt(d.forks_count)}</div><div class="stat-lbl">Forks</div></div>
+          <div class="stat"><div class="stat-val">${fmt(d.stargazers_count)}</div><div class="stat-lbl">Stars</div></div>
+          <div class="stat"><div class="stat-val">${fmt(d.forks_count)}</div><div class="stat-lbl">Forks</div></div>
           ${d.open_issues_count ? `<div class="stat"><div class="stat-val">${fmt(d.open_issues_count)}</div><div class="stat-lbl">Issues</div></div>` : ''}
         </div>
         ${d.language   ? `<div class="info-meta"><span class="lang-pip" style="background:var(--language)"></span>${esc(d.language)}</div>` : ''}
-        ${d.license?.spdx_id ? `<div class="info-meta">📄 ${esc(d.license.spdx_id)}</div>` : ''}
-        ${d.topics?.length ? `<div class="info-topics">${d.topics.slice(0,6).map(t => `<span class="topic-chip">${esc(t)}</span>`).join('')}</div>` : ''}
-        <a class="info-link" href="${d.html_url}" target="_blank" rel="noopener">View on GitHub →</a>
+        ${d.license?.spdx_id ? `<div class="info-meta">${esc(d.license.spdx_id)}</div>` : ''}
+        ${d.topics?.length ? `<div class="info-topics">${d.topics.map(t => `<span class="topic-chip">${esc(t)}</span>`).join('')}</div>` : ''}
+        <a class="info-link" href="${esc(d.html_url)}" target="_blank" rel="noopener">View on GitHub</a>
         ${node.expanded ? `<div class="action-hint">expanded</div>` : `<div class="action-hint">double-click to dive in</div>`}
       `;
     } else if (node.type === 'contributor') {
       html = `
         <div class="info-head">
-          <img class="info-avatar" src="${d.avatar_url}&s=80" alt="">
+          <img class="info-avatar" src="${esc(d.avatar_url)}&s=80" alt="">
           <div>
             <div class="info-name">${esc(d.login)}</div>
             <span class="badge contributor">Contributor</span>
@@ -442,17 +415,16 @@ class App {
         <div class="info-stats">
           <div class="stat"><div class="stat-val">${fmt(d.contributions)}</div><div class="stat-lbl">Commits</div></div>
         </div>
-        <a class="info-link" href="https://github.com/${encodeURIComponent(d.login)}" target="_blank" rel="noopener">View on GitHub →</a>
+        <a class="info-link" href="https://github.com/${encodeURIComponent(d.login)}" target="_blank" rel="noopener">View on GitHub</a>
         <div class="action-row">
-          <button class="action-btn expand" data-login="${esc(d.login)}">➕ Expand into graph</button>
-          <button class="action-btn search"  data-login="${esc(d.login)}">🔍 New search</button>
+          <button class="action-btn expand" data-login="${esc(d.login)}">Expand into graph</button>
+          <button class="action-btn search"  data-login="${esc(d.login)}">New search</button>
         </div>
         <div class="action-hint">or double-click the node to expand</div>
       `;
     } else if (node.type === 'language') {
       html = `
         <div class="info-head">
-          <div class="info-icon" style="font-size:28px">💻</div>
           <div>
             <div class="info-name">${esc(d.name)}</div>
             <span class="badge language">Language</span>
@@ -462,20 +434,18 @@ class App {
     } else if (node.type === 'topic') {
       html = `
         <div class="info-head">
-          <div class="info-icon" style="font-size:28px">#</div>
           <div>
             <div class="info-name">${esc(d.name)}</div>
             <span class="badge topic">Topic</span>
           </div>
         </div>
-        <a class="info-link" href="https://github.com/topics/${encodeURIComponent(d.name)}" target="_blank" rel="noopener">Browse topic on GitHub →</a>
+        <a class="info-link" href="https://github.com/topics/${encodeURIComponent(d.name)}" target="_blank" rel="noopener">Browse topic on GitHub</a>
       `;
     }
 
-    document.getElementById('info-content').innerHTML = html;
+    document.getElementById('info-content').innerHTML = html;  // safe: all values pass through esc()
     document.getElementById('info-panel').classList.add('visible');
 
-    // Wire action buttons — done here to avoid inline onclick (XSS-safe)
     document.querySelector('.action-btn.expand')?.addEventListener('click', e =>
       this._expand(e.currentTarget.dataset.login)
     );
@@ -504,9 +474,11 @@ class App {
   }
 
   _updateRateLimit() {
-    const n   = this.api.rateLimitRemaining;
-    const col = n < 10 ? '#f85149' : n < 25 ? '#ffa657' : '#484f58';
-    document.getElementById('rate-display').innerHTML = `<span style="color:${col}">${n}</span>/60 API`;
+    const n = this.api.rateLimitRemaining;
+    if (n === null) return;
+    const col = n < 100 ? '#f85149' : n < 500 ? '#ffa657' : '#484f58';
+    document.getElementById('rate-display').textContent = `${n} API`;
+    document.getElementById('rate-display').style.color = col;
   }
 }
 
