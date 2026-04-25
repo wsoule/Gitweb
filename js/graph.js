@@ -1,16 +1,30 @@
 class GitGraph {
-  constructor(svgId) {
-    this.svgEl = document.getElementById(svgId);
-    this.nodes = [];
-    this.links = [];
+  constructor(canvasId) {
+    this.canvas = document.getElementById(canvasId);
+    this.ctx    = this.canvas.getContext('2d');
+    this.nodes  = [];
+    this.links  = [];
     this.simulation = null;
     this.selectedNode = null;
-    this.onNodeClick = null;
+    this.hoveredNode  = null;
+    this.onNodeClick    = null;
     this.onNodeDblClick = null;
 
-    // Cached DOM arrays for fast tick updates
-    this._linkEls = [];
-    this._nodeEls = [];
+    // Transform state (pan + zoom)
+    this.tx = 0;
+    this.ty = 0;
+    this.scale = 1;
+
+    // Drag state
+    this._dragNode   = null;
+    this._dragStartX = 0;
+    this._dragStartY = 0;
+    this._isPanning  = false;
+    this._panStartX  = 0;
+    this._panStartY  = 0;
+
+    this.paused = false;
+    this._raf   = null;
 
     this.colors = {
       user:        '#e6edf3',
@@ -21,44 +35,24 @@ class GitGraph {
       topic:       '#f0883e',
     };
 
+    this._glowColors = {};
+    for (const [k, v] of Object.entries(this.colors)) {
+      this._glowColors[k] = _hexToRgba(v, 0.12);
+    }
+
     this._init();
     this._bindResize();
+    this._bindMouse();
+    this._startLoop();
   }
 
-  get W() { return this.svgEl.clientWidth; }
-  get H() { return this.svgEl.clientHeight; }
+  get W() { return this.canvas.width; }
+  get H() { return this.canvas.height; }
 
   // ── Setup ─────────────────────────────────────────────
 
   _init() {
-    const svg = d3.select(this.svgEl);
-
-    svg.on('click', (e) => {
-      if (e.target === this.svgEl || e.target.tagName === 'rect') {
-        this._deselect();
-        if (this.onNodeClick) this.onNodeClick(null);
-      }
-    });
-
-    this.zoom = d3.zoom()
-      .scaleExtent([0.04, 10])
-      .on('zoom', (e) => this.root.attr('transform', e.transform));
-
-    svg.call(this.zoom).on('dblclick.zoom', null);
-
-    const defs = svg.append('defs');
-    this._addGlowFilter(defs);
-    this._addBgGradient(defs);
-
-    svg.append('rect')
-      .attr('width', '100%').attr('height', '100%')
-      .attr('fill', 'url(#bg-grad)');
-
-    this.root      = svg.append('g').attr('class', 'graph-root');
-    this.linkLayer = this.root.append('g').attr('class', 'links');
-    this.nodeLayer = this.root.append('g').attr('class', 'nodes');
-
-    this.paused = false;
+    this._resize();
 
     this.simulation = d3.forceSimulation()
       .alphaDecay(0.06)
@@ -84,150 +78,260 @@ class GitGraph {
         .theta(1.2)
         .distanceMax(600)
       )
-      .force('center',  d3.forceCenter(this.W / 2, this.H / 2).strength(0.03))
-      .force('collide', d3.forceCollide().radius(d => d.radius + 6).strength(0.3).iterations(1))
-      .on('tick', () => this._tick());
+      .force('center', d3.forceCenter(this.canvas.width / 2, this.canvas.height / 2).strength(0.03))
+      .force('collide', d3.forceCollide().radius(d => d.radius + 6).strength(0.3).iterations(1));
   }
 
-  _addGlowFilter(defs) {
-    const f = defs.append('filter')
-      .attr('id', 'glow')
-      .attr('x', '-60%').attr('y', '-60%')
-      .attr('width', '220%').attr('height', '220%');
-    f.append('feGaussianBlur').attr('in', 'SourceGraphic').attr('stdDeviation', '5').attr('result', 'blur');
-    const m = f.append('feMerge');
-    m.append('feMergeNode').attr('in', 'blur');
-    m.append('feMergeNode').attr('in', 'SourceGraphic');
-  }
-
-  _addBgGradient(defs) {
-    const g = defs.append('radialGradient')
-      .attr('id', 'bg-grad').attr('cx', '50%').attr('cy', '50%').attr('r', '75%');
-    g.append('stop').attr('offset', '0%'  ).attr('stop-color', '#182030');
-    g.append('stop').attr('offset', '100%').attr('stop-color', '#0d1117');
+  _resize() {
+    const rect = this.canvas.parentElement.getBoundingClientRect();
+    const dpr  = window.devicePixelRatio || 1;
+    this.canvas.width  = rect.width  * dpr;
+    this.canvas.height = rect.height * dpr;
+    this.canvas.style.width  = rect.width  + 'px';
+    this.canvas.style.height = rect.height + 'px';
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this._cssW = rect.width;
+    this._cssH = rect.height;
   }
 
   _bindResize() {
     new ResizeObserver(() => {
+      this._resize();
       if (this.simulation) {
-        this.simulation.force('center', d3.forceCenter(this.W / 2, this.H / 2)).alpha(0.1).restart();
+        this.simulation.force('center', d3.forceCenter(this._cssW / 2, this._cssH / 2));
+        this.simulation.alpha(0.1).restart();
       }
-    }).observe(this.svgEl.parentElement);
+    }).observe(this.canvas.parentElement);
   }
 
-  // ── Render ────────────────────────────────────────────
+  // ── Mouse / touch ────────────────────────────────────
+
+  _bindMouse() {
+    const c = this.canvas;
+
+    c.addEventListener('wheel', e => {
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 1.08 : 0.93;
+      const rect = c.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      this.tx = mx - (mx - this.tx) * factor;
+      this.ty = my - (my - this.ty) * factor;
+      this.scale *= factor;
+    }, { passive: false });
+
+    c.addEventListener('mousedown', e => {
+      const [wx, wy] = this._screenToWorld(e.offsetX, e.offsetY);
+      const node = this._hitTest(wx, wy);
+
+      if (node) {
+        this._dragNode = node;
+        this._dragStartX = wx;
+        this._dragStartY = wy;
+        this._dragMoved = false;
+        node.fx = node.x;
+        node.fy = node.y;
+        this.simulation.alphaTarget(0.3).restart();
+      } else {
+        this._isPanning = true;
+        this._panStartX = e.clientX - this.tx;
+        this._panStartY = e.clientY - this.ty;
+      }
+    });
+
+    c.addEventListener('mousemove', e => {
+      if (this._dragNode) {
+        const [wx, wy] = this._screenToWorld(e.offsetX, e.offsetY);
+        this._dragNode.fx = wx;
+        this._dragNode.fy = wy;
+        const dx = wx - this._dragStartX;
+        const dy = wy - this._dragStartY;
+        if (dx * dx + dy * dy > 9) this._dragMoved = true;
+      } else if (this._isPanning) {
+        this.tx = e.clientX - this._panStartX;
+        this.ty = e.clientY - this._panStartY;
+      } else {
+        const [wx, wy] = this._screenToWorld(e.offsetX, e.offsetY);
+        const node = this._hitTest(wx, wy);
+        this.hoveredNode = node;
+        c.style.cursor = node ? 'pointer' : 'grab';
+      }
+    });
+
+    c.addEventListener('mouseup', e => {
+      if (this._dragNode) {
+        if (!this._dragMoved) {
+          this._select(this._dragNode);
+          if (this.onNodeClick) this.onNodeClick(this._dragNode);
+        }
+        this._dragNode.fx = null;
+        this._dragNode.fy = null;
+        this._dragNode = null;
+        this.simulation.alphaTarget(0);
+      } else if (this._isPanning) {
+        this._isPanning = false;
+      } else {
+        // Click on empty space
+        this._deselect();
+        if (this.onNodeClick) this.onNodeClick(null);
+      }
+    });
+
+    c.addEventListener('dblclick', e => {
+      const [wx, wy] = this._screenToWorld(e.offsetX, e.offsetY);
+      const node = this._hitTest(wx, wy);
+      if (node && this.onNodeDblClick) this.onNodeDblClick(node);
+    });
+  }
+
+  _screenToWorld(sx, sy) {
+    return [(sx - this.tx) / this.scale, (sy - this.ty) / this.scale];
+  }
+
+  _hitTest(wx, wy) {
+    // Iterate in reverse so top-drawn nodes are hit first
+    for (let i = this.nodes.length - 1; i >= 0; i--) {
+      const n  = this.nodes[i];
+      const dx = wx - (n.x ?? 0);
+      const dy = wy - (n.y ?? 0);
+      const r  = n.radius + 4;
+      if (dx * dx + dy * dy <= r * r) return n;
+    }
+    return null;
+  }
+
+  // ── Render loop ──────────────────────────────────────
+
+  _startLoop() {
+    const loop = () => {
+      this._draw();
+      this._raf = requestAnimationFrame(loop);
+    };
+    this._raf = requestAnimationFrame(loop);
+  }
+
+  _draw() {
+    const ctx = this.ctx;
+    const w   = this._cssW;
+    const h   = this._cssH;
+
+    // Clear
+    ctx.save();
+    ctx.setTransform(window.devicePixelRatio || 1, 0, 0, window.devicePixelRatio || 1, 0, 0);
+    ctx.fillStyle = '#0d1117';
+    ctx.fillRect(0, 0, w, h);
+
+    // Apply pan/zoom
+    ctx.translate(this.tx, this.ty);
+    ctx.scale(this.scale, this.scale);
+
+    const selected  = this.selectedNode;
+    const linkedSet = this._linkedSet;
+
+    // ── Links ──
+    for (let i = 0, n = this.links.length; i < n; i++) {
+      const l = this.links[i];
+      const sx = l.source.x, sy = l.source.y;
+      const tx = l.target.x, ty = l.target.y;
+      if (sx === undefined || tx === undefined) continue;
+
+      let alpha = l._type === 'shared-contributor' ? 0.15 : 0.1;
+      let lw = 1;
+
+      if (selected) {
+        const sid = l.source.id, tid = l.target.id;
+        if (sid === selected.id || tid === selected.id) {
+          alpha = 0.55;
+          lw = 2;
+        } else {
+          alpha = 0.03;
+        }
+      }
+
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.lineTo(tx, ty);
+      if (l._type === 'shared-contributor') {
+        ctx.strokeStyle = `rgba(63,185,80,${alpha})`;
+        ctx.setLineDash([5, 4]);
+      } else {
+        ctx.strokeStyle = `rgba(255,255,255,${alpha})`;
+        ctx.setLineDash([]);
+      }
+      ctx.lineWidth = lw;
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    // ── Nodes ──
+    for (let i = 0, n = this.nodes.length; i < n; i++) {
+      const d = this.nodes[i];
+      const x = d.x ?? 0;
+      const y = d.y ?? 0;
+      const color = this.colors[d.type] || '#888';
+
+      let nodeAlpha = 1;
+      if (selected && linkedSet && !linkedSet.has(d.id)) nodeAlpha = 0.12;
+
+      ctx.globalAlpha = nodeAlpha;
+
+      // Glow (simple radial gradient — much cheaper than SVG filter)
+      if (d.type === 'user' || d.type === 'org' || d.type === 'repo' || d === this.hoveredNode) {
+        const gr = d.radius * 2.5;
+        const grad = ctx.createRadialGradient(x, y, d.radius * 0.5, x, y, gr);
+        grad.addColorStop(0, _hexToRgba(color, d === this.hoveredNode ? 0.25 : 0.12));
+        grad.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(x - gr, y - gr, gr * 2, gr * 2);
+      }
+
+      // Circle
+      ctx.beginPath();
+      ctx.arc(x, y, d.radius, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+
+      // Stroke
+      if (d.expanded) {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2.5;
+        ctx.setLineDash([4, 3]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      } else {
+        ctx.strokeStyle = '#0d1117';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+
+      // Label
+      const isPrimary = d.type === 'user' || d.type === 'org';
+      const fontSize  = isPrimary ? 12 : 10;
+      const fontWeight = isPrimary ? '600' : '400';
+      ctx.font = `${fontWeight} ${fontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif`;
+      ctx.fillStyle = `rgba(173,181,189,${nodeAlpha})`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      const maxLen = isPrimary ? 22 : 16;
+      const label  = d.label.length > maxLen ? d.label.slice(0, maxLen - 1) + '…' : d.label;
+      ctx.fillText(label, x, y + d.radius + 4);
+
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.restore();
+  }
+
+  // ── Update ───────────────────────────────────────────
 
   update(nodes, links) {
     this.nodes = nodes;
     this.links = links;
 
-    const isLarge = nodes.length > 200;
-
-    // ── Links ──
-    this.linkLayer.selectAll('line.link')
-      .data(links, d => d._key)
-      .join(
-        enter => enter.append('line')
-          .attr('class', 'link')
-          .attr('stroke',           d => _linkStroke(d))
-          .attr('stroke-width',     1)
-          .attr('stroke-dasharray', d => d._type === 'shared-contributor' ? '5,4' : null)
-          .attr('opacity', isLarge ? 1 : 0)
-          .call(s => isLarge ? s : s.transition().duration(500).attr('opacity', 1)),
-        update => update
-          .attr('stroke',           d => _linkStroke(d))
-          .attr('stroke-dasharray', d => d._type === 'shared-contributor' ? '5,4' : null),
-        exit => isLarge ? exit.remove() : exit.transition().duration(250).attr('opacity', 0).remove()
-      );
-
-    // ── Nodes ──
-    this.nodeLayer.selectAll('g.node')
-      .data(nodes, d => d.id)
-      .join(
-        enter => {
-          const g = enter.append('g').attr('class', 'node').attr('opacity', isLarge ? 1 : 0);
-
-          // Only apply expensive glow filter on primary nodes
-          const useGlow = d => d.type === 'user' || d.type === 'org' || d.type === 'repo';
-
-          g.append('circle')
-            .attr('class', 'node-glow')
-            .attr('r', d => d.radius * 2.2)
-            .attr('fill', d => this.colors[d.type] || '#888')
-            .attr('opacity', d => d.expanded ? 0.16 : 0.08)
-            .attr('filter', d => useGlow(d) ? 'url(#glow)' : null);
-
-          g.append('circle')
-            .attr('class', 'node-circle')
-            .attr('r', d => d.radius)
-            .attr('fill', d => this.colors[d.type] || '#888')
-            .attr('stroke', d => d.expanded ? this.colors[d.type] : '#0d1117')
-            .attr('stroke-width', d => d.expanded ? 2.5 : 1.5)
-            .attr('stroke-dasharray', d => d.expanded ? '4,3' : null);
-
-          g.append('text')
-            .attr('class', 'node-label')
-            .attr('dy', d => d.radius + 13)
-            .attr('text-anchor', 'middle')
-            .attr('fill', '#adb5bd')
-            .attr('font-size',   d => (d.type === 'user' || d.type === 'org') ? '12px' : '10px')
-            .attr('font-weight', d => (d.type === 'user' || d.type === 'org') ? '600'  : '400')
-            .text(d => {
-              const max = (d.type === 'user' || d.type === 'org') ? 22 : 16;
-              return d.label.length > max ? d.label.slice(0, max - 1) + '…' : d.label;
-            });
-
-          g.call(this._drag());
-          g.on('click',    (e, d) => { e.stopPropagation(); this._select(d); if (this.onNodeClick)    this.onNodeClick(d); });
-          g.on('dblclick', (e, d) => { e.stopPropagation();                  if (this.onNodeDblClick) this.onNodeDblClick(d); });
-          g.on('mouseover', (e, d) => d3.select(e.currentTarget).select('.node-glow').attr('opacity', 0.26));
-          g.on('mouseout',  (e, d) => d3.select(e.currentTarget).select('.node-glow').attr('opacity', this.selectedNode === d ? 0.26 : (d.expanded ? 0.16 : 0.08)));
-
-          if (!isLarge) g.transition().duration(450).attr('opacity', 1);
-          return g;
-        },
-        update => {
-          update.select('.node-circle')
-            .attr('stroke',           d => d.expanded ? this.colors[d.type] : '#0d1117')
-            .attr('stroke-width',     d => d.expanded ? 2.5 : 1.5)
-            .attr('stroke-dasharray', d => d.expanded ? '4,3' : null);
-          update.select('.node-glow')
-            .attr('opacity', d => d.expanded ? 0.16 : 0.08);
-          return update;
-        },
-        exit => isLarge ? exit.remove() : exit.transition().duration(280).attr('opacity', 0).remove()
-      );
-
-    // Cache raw DOM elements for fast _tick
-    this._linkEls = this.linkLayer.node().children;
-    this._nodeEls = this.nodeLayer.node().children;
-
-    // Restart simulation
     this.simulation.nodes(nodes);
     this.simulation.force('link').links(links);
     this.paused = false;
     this.simulation.alpha(0.3).restart();
-  }
-
-  _tick() {
-    // Direct DOM manipulation — bypasses D3 selection overhead
-    const linkEls = this._linkEls;
-    const links   = this.links;
-    for (let i = 0, n = Math.min(linkEls.length, links.length); i < n; i++) {
-      const l  = links[i];
-      const el = linkEls[i];
-      el.setAttribute('x1', l.source.x);
-      el.setAttribute('y1', l.source.y);
-      el.setAttribute('x2', l.target.x);
-      el.setAttribute('y2', l.target.y);
-    }
-
-    const nodeEls = this._nodeEls;
-    const nodes   = this.nodes;
-    for (let i = 0, n = Math.min(nodeEls.length, nodes.length); i < n; i++) {
-      const d = nodes[i];
-      nodeEls[i].setAttribute('transform', `translate(${d.x ?? 0},${d.y ?? 0})`);
-    }
   }
 
   // ── Selection ─────────────────────────────────────────
@@ -239,53 +343,44 @@ class GitGraph {
       const s = l.source?.id ?? l.source, t = l.target?.id ?? l.target;
       if (s === node.id || t === node.id) { linked.add(s); linked.add(t); }
     });
-
-    this.nodeLayer.selectAll('g.node').attr('opacity', d => linked.has(d.id) ? 1 : 0.15);
-
-    this.linkLayer.selectAll('line.link').attr('stroke', d => {
-      const s = d.source?.id ?? d.source, t = d.target?.id ?? d.target;
-      if (s === node.id || t === node.id) return 'rgba(255,255,255,0.55)';
-      return d._type === 'shared-contributor' ? 'rgba(63,185,80,0.04)' : 'rgba(255,255,255,0.03)';
-    }).attr('stroke-width', d => {
-      const s = d.source?.id ?? d.source, t = d.target?.id ?? d.target;
-      return (s === node.id || t === node.id) ? 2 : 1;
-    });
+    this._linkedSet = linked;
   }
 
   _deselect() {
     this.selectedNode = null;
-    this.nodeLayer.selectAll('g.node').attr('opacity', 1);
-    this.linkLayer.selectAll('line.link')
-      .attr('stroke',       d => _linkStroke(d))
-      .attr('stroke-width', 1);
-  }
-
-  // ── Drag ──────────────────────────────────────────────
-
-  _drag() {
-    return d3.drag()
-      .on('start', (e, d) => { if (!e.active) this.simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
-      .on('drag',  (e, d) => { d.fx = e.x; d.fy = e.y; })
-      .on('end',   (e, d) => { if (!e.active) this.simulation.alphaTarget(0); d.fx = null; d.fy = null; });
+    this._linkedSet   = null;
   }
 
   // ── Camera ────────────────────────────────────────────
 
   fitView() {
     if (!this.nodes.length) return;
-    const box = this.root.node().getBBox();
-    if (!box.width || !box.height) return;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const n of this.nodes) {
+      if (n.x === undefined) continue;
+      minX = Math.min(minX, n.x - n.radius);
+      minY = Math.min(minY, n.y - n.radius);
+      maxX = Math.max(maxX, n.x + n.radius);
+      maxY = Math.max(maxY, n.y + n.radius);
+    }
+    if (!isFinite(minX)) return;
+    const bw  = maxX - minX;
+    const bh  = maxY - minY;
     const pad = 60;
-    const scale = Math.min((this.W - pad * 2) / box.width, (this.H - pad * 2) / box.height, 2);
-    const tx = this.W / 2 - scale * (box.x + box.width  / 2);
-    const ty = this.H / 2 - scale * (box.y + box.height / 2);
-    d3.select(this.svgEl).transition().duration(650).call(
-      this.zoom.transform, d3.zoomIdentity.translate(tx, ty).scale(scale)
-    );
+    const sw  = this._cssW - pad * 2;
+    const sh  = this._cssH - pad * 2;
+    const s   = Math.min(sw / bw, sh / bh, 2);
+    this.scale = s;
+    this.tx = this._cssW / 2 - s * (minX + bw / 2);
+    this.ty = this._cssH / 2 - s * (minY + bh / 2);
   }
 
   zoomBy(factor) {
-    d3.select(this.svgEl).transition().duration(220).call(this.zoom.scaleBy, factor);
+    const cx = this._cssW / 2;
+    const cy = this._cssH / 2;
+    this.tx = cx - (cx - this.tx) * factor;
+    this.ty = cy - (cy - this.ty) * factor;
+    this.scale *= factor;
   }
 
   togglePause() {
@@ -299,8 +394,11 @@ class GitGraph {
   }
 }
 
-// ── Module-level helpers ───────────────────────────────
+// ── Helpers ─────────────────────────────────────────────
 
-function _linkStroke(l) {
-  return l._type === 'shared-contributor' ? 'rgba(63,185,80,0.22)' : 'rgba(255,255,255,0.1)';
+function _hexToRgba(hex, alpha) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
 }
