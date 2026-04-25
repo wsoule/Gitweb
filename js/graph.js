@@ -5,17 +5,14 @@ export class GitGraph {
     this.containerEl = document.getElementById(containerId);
     this.nodes  = [];
     this.links  = [];
-    this.nodeIndexMap = new Map(); // id → array index
+    this.nodeIndexMap = new Map();
     this.selectedNode = null;
     this.onNodeClick    = null;
     this.onNodeDblClick = null;
     this.paused = false;
 
-    // Double-click detection
     this._lastClickTime  = 0;
     this._lastClickIndex = -1;
-
-    // Tooltip mouse tracking
     this._mouseX = 0;
     this._mouseY = 0;
 
@@ -39,13 +36,12 @@ export class GitGraph {
 
   _createTooltip() {
     this._tooltip = document.createElement('div');
-    this._tooltip.className = 'graph-tooltip';
     this._tooltip.style.cssText = 'display:none;position:fixed;z-index:50;pointer-events:none;' +
       'background:rgba(22,27,34,.95);border:1px solid #30363d;border-radius:6px;padding:4px 10px;' +
       'font-size:12px;color:#e6edf3;white-space:nowrap;backdrop-filter:blur(4px);';
     document.body.appendChild(this._tooltip);
 
-    this.containerEl.addEventListener('mousemove', e => {
+    document.addEventListener('mousemove', e => {
       this._mouseX = e.clientX;
       this._mouseY = e.clientY;
       if (this._tooltip.style.display === 'block') {
@@ -56,7 +52,7 @@ export class GitGraph {
   }
 
   _createGraph() {
-    this.graph = new Graph(this.containerEl, {
+    this._baseConfig = {
       backgroundColor: '#0d1117',
       pointDefaultColor: '#888888',
       linkDefaultColor: '#ffffff',
@@ -68,7 +64,7 @@ export class GitGraph {
       fitViewDelay: 600,
       fitViewPadding: 0.12,
       fitViewDuration: 500,
-      spaceSize: 8192,
+      spaceSize: 4096,
       enableSimulation: true,
       simulationGravity: 0.15,
       simulationRepulsion: 0.8,
@@ -87,7 +83,6 @@ export class GitGraph {
         if (index === undefined || index === null) return;
         const now = Date.now();
 
-        // Double-click detection (cosmos has no native dblclick)
         if (index === this._lastClickIndex && now - this._lastClickTime < 400) {
           this._lastClickTime = 0;
           this._lastClickIndex = -1;
@@ -123,7 +118,9 @@ export class GitGraph {
       onPointMouseOut: () => {
         this._tooltip.style.display = 'none';
       },
-    });
+    };
+
+    this.graph = new Graph(this.containerEl, this._baseConfig);
   }
 
   // ── Data ──────────────────────────────────────────────
@@ -131,20 +128,19 @@ export class GitGraph {
   update(nodes, links) {
     this.nodes = nodes;
     this.links = links;
+    this.selectedNode = null;
 
     this.nodeIndexMap.clear();
     for (let i = 0; i < nodes.length; i++) {
       this.nodeIndexMap.set(nodes[i].id, i);
     }
 
-    // Positions — random initial spread
     const positions = new Float32Array(nodes.length * 2);
     for (let i = 0; i < nodes.length; i++) {
-      positions[i * 2]     = (Math.random() - 0.5) * 4096;
-      positions[i * 2 + 1] = (Math.random() - 0.5) * 4096;
+      positions[i * 2]     = (Math.random() - 0.5) * 2048;
+      positions[i * 2 + 1] = (Math.random() - 0.5) * 2048;
     }
 
-    // Colors — RGBA floats 0-1
     const colors = new Float32Array(nodes.length * 4);
     for (let i = 0; i < nodes.length; i++) {
       const c = this._rgbaCache[nodes[i].type] || [0.5, 0.5, 0.5, 1];
@@ -154,13 +150,11 @@ export class GitGraph {
       colors[i * 4 + 3] = c[3];
     }
 
-    // Sizes
     const sizes = new Float32Array(nodes.length);
     for (let i = 0; i < nodes.length; i++) {
       sizes[i] = nodes[i].radius * 2;
     }
 
-    // Links — index pairs
     const linkArr = [];
     const linkColors = [];
     for (const l of links) {
@@ -184,7 +178,14 @@ export class GitGraph {
     this.graph.setLinks(new Float32Array(linkArr));
     if (linkColors.length) this.graph.setLinkColors(new Float32Array(linkColors));
 
-    this._deselect();
+    // Reset highlight state via full config (includes base + cleared highlights)
+    this.graph.setConfig({
+      ...this._baseConfig,
+      highlightedPointIndices: undefined,
+      pointGreyoutOpacity: undefined,
+      focusedPointIndex: undefined,
+    });
+
     if (!this.paused) this.graph.start();
   }
 
@@ -197,6 +198,7 @@ export class GitGraph {
     const highlighted = [index, ...neighbors];
 
     this.graph.setConfig({
+      ...this._baseConfig,
       highlightedPointIndices: highlighted,
       pointGreyoutOpacity: 0.08,
       focusedPointIndex: index,
@@ -206,6 +208,7 @@ export class GitGraph {
   _deselect() {
     this.selectedNode = null;
     this.graph.setConfig({
+      ...this._baseConfig,
       highlightedPointIndices: undefined,
       pointGreyoutOpacity: undefined,
       focusedPointIndex: undefined,
