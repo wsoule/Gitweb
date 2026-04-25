@@ -2,7 +2,15 @@
   "name": "gitgraph",
   "version": "1.0.0",
   "scripts": {
+    "build": "esbuild js/main.js --bundle --outfile=dist/bundle.js --format=iife --minify",
+    "dev": "esbuild js/main.js --bundle --outfile=dist/bundle.js --format=iife --watch",
     "start": "node start.js"
+  },
+  "dependencies": {
+    "@cosmos.gl/graph": "^2.6.4"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
   },
   "engines": {
     "node": ">=18"

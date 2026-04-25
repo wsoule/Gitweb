@@ -1,32 +1,25 @@
-class GitGraph {
-  constructor(canvasId) {
-    this.canvas = document.getElementById(canvasId);
-    this.ctx    = this.canvas.getContext('2d');
+import { Graph } from '@cosmos.gl/graph'
+
+export class GitGraph {
+  constructor(containerId) {
+    this.containerEl = document.getElementById(containerId);
     this.nodes  = [];
     this.links  = [];
-    this.simulation = null;
+    this.nodeIndexMap = new Map(); // id → array index
     this.selectedNode = null;
-    this.hoveredNode  = null;
     this.onNodeClick    = null;
     this.onNodeDblClick = null;
-
-    // Transform state (pan + zoom)
-    this.tx = 0;
-    this.ty = 0;
-    this.scale = 1;
-
-    // Drag state
-    this._dragNode   = null;
-    this._dragStartX = 0;
-    this._dragStartY = 0;
-    this._isPanning  = false;
-    this._panStartX  = 0;
-    this._panStartY  = 0;
-
     this.paused = false;
-    this._raf   = null;
 
-    this.colors = {
+    // Double-click detection
+    this._lastClickTime  = 0;
+    this._lastClickIndex = -1;
+
+    // Tooltip mouse tracking
+    this._mouseX = 0;
+    this._mouseY = 0;
+
+    this.colorMap = {
       user:        '#e6edf3',
       org:         '#e6edf3',
       repo:        '#58a6ff',
@@ -35,370 +28,223 @@ class GitGraph {
       topic:       '#f0883e',
     };
 
-    this._glowColors = {};
-    for (const [k, v] of Object.entries(this.colors)) {
-      this._glowColors[k] = _hexToRgba(v, 0.12);
+    this._rgbaCache = {};
+    for (const [k, hex] of Object.entries(this.colorMap)) {
+      this._rgbaCache[k] = hexToFloats(hex);
     }
 
-    this._init();
-    this._bindResize();
-    this._bindMouse();
-    this._startLoop();
+    this._createTooltip();
+    this._createGraph();
   }
 
-  get W() { return this.canvas.width; }
-  get H() { return this.canvas.height; }
+  _createTooltip() {
+    this._tooltip = document.createElement('div');
+    this._tooltip.className = 'graph-tooltip';
+    this._tooltip.style.cssText = 'display:none;position:fixed;z-index:50;pointer-events:none;' +
+      'background:rgba(22,27,34,.95);border:1px solid #30363d;border-radius:6px;padding:4px 10px;' +
+      'font-size:12px;color:#e6edf3;white-space:nowrap;backdrop-filter:blur(4px);';
+    document.body.appendChild(this._tooltip);
 
-  // ── Setup ─────────────────────────────────────────────
-
-  _init() {
-    this._resize();
-
-    this.simulation = d3.forceSimulation()
-      .alphaDecay(0.06)
-      .alphaMin(0.008)
-      .velocityDecay(0.5)
-      .force('link', d3.forceLink()
-        .id(d => d.id)
-        .distance(l => {
-          if (l._type === 'shared-contributor') return 100;
-          const st = l.source?.type || l.source;
-          if (st === 'user' || st === 'org') return 250;
-          return 140;
-        })
-        .strength(l => l._type === 'shared-contributor' ? 0.04 : 0.12)
-        .iterations(1)
-      )
-      .force('charge', d3.forceManyBody()
-        .strength(d => {
-          if (d.type === 'user' || d.type === 'org') return -500;
-          if (d.type === 'repo')                     return -200;
-          return -100;
-        })
-        .theta(1.2)
-        .distanceMax(600)
-      )
-      .force('center', d3.forceCenter(this.canvas.width / 2, this.canvas.height / 2).strength(0.03))
-      .force('collide', d3.forceCollide().radius(d => d.radius + 6).strength(0.3).iterations(1));
-  }
-
-  _resize() {
-    const rect = this.canvas.parentElement.getBoundingClientRect();
-    const dpr  = window.devicePixelRatio || 1;
-    this.canvas.width  = rect.width  * dpr;
-    this.canvas.height = rect.height * dpr;
-    this.canvas.style.width  = rect.width  + 'px';
-    this.canvas.style.height = rect.height + 'px';
-    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    this._cssW = rect.width;
-    this._cssH = rect.height;
-  }
-
-  _bindResize() {
-    new ResizeObserver(() => {
-      this._resize();
-      if (this.simulation) {
-        this.simulation.force('center', d3.forceCenter(this._cssW / 2, this._cssH / 2));
-        this.simulation.alpha(0.1).restart();
-      }
-    }).observe(this.canvas.parentElement);
-  }
-
-  // ── Mouse / touch ────────────────────────────────────
-
-  _bindMouse() {
-    const c = this.canvas;
-
-    c.addEventListener('wheel', e => {
-      e.preventDefault();
-      const factor = e.deltaY < 0 ? 1.08 : 0.93;
-      const rect = c.getBoundingClientRect();
-      const mx = e.clientX - rect.left;
-      const my = e.clientY - rect.top;
-      this.tx = mx - (mx - this.tx) * factor;
-      this.ty = my - (my - this.ty) * factor;
-      this.scale *= factor;
-    }, { passive: false });
-
-    c.addEventListener('mousedown', e => {
-      const [wx, wy] = this._screenToWorld(e.offsetX, e.offsetY);
-      const node = this._hitTest(wx, wy);
-
-      if (node) {
-        this._dragNode = node;
-        this._dragStartX = wx;
-        this._dragStartY = wy;
-        this._dragMoved = false;
-        node.fx = node.x;
-        node.fy = node.y;
-        this.simulation.alphaTarget(0.3).restart();
-      } else {
-        this._isPanning = true;
-        this._panStartX = e.clientX - this.tx;
-        this._panStartY = e.clientY - this.ty;
+    this.containerEl.addEventListener('mousemove', e => {
+      this._mouseX = e.clientX;
+      this._mouseY = e.clientY;
+      if (this._tooltip.style.display === 'block') {
+        this._tooltip.style.left = (e.clientX + 14) + 'px';
+        this._tooltip.style.top  = (e.clientY - 6) + 'px';
       }
     });
+  }
 
-    c.addEventListener('mousemove', e => {
-      if (this._dragNode) {
-        const [wx, wy] = this._screenToWorld(e.offsetX, e.offsetY);
-        this._dragNode.fx = wx;
-        this._dragNode.fy = wy;
-        const dx = wx - this._dragStartX;
-        const dy = wy - this._dragStartY;
-        if (dx * dx + dy * dy > 9) this._dragMoved = true;
-      } else if (this._isPanning) {
-        this.tx = e.clientX - this._panStartX;
-        this.ty = e.clientY - this._panStartY;
-      } else {
-        const [wx, wy] = this._screenToWorld(e.offsetX, e.offsetY);
-        const node = this._hitTest(wx, wy);
-        this.hoveredNode = node;
-        c.style.cursor = node ? 'pointer' : 'grab';
-      }
-    });
+  _createGraph() {
+    this.graph = new Graph(this.containerEl, {
+      backgroundColor: '#0d1117',
+      pointDefaultColor: '#888888',
+      linkDefaultColor: '#ffffff',
+      linkOpacity: 0.12,
+      linkDefaultWidth: 1,
+      linkGreyoutOpacity: 0.03,
+      enableDrag: true,
+      fitViewOnInit: true,
+      fitViewDelay: 600,
+      fitViewPadding: 0.12,
+      fitViewDuration: 500,
+      spaceSize: 8192,
+      enableSimulation: true,
+      simulationGravity: 0.15,
+      simulationRepulsion: 0.8,
+      simulationLinkSpring: 0.4,
+      simulationLinkDistance: 12,
+      simulationFriction: 0.85,
+      simulationDecay: 4000,
+      simulationRepulsionTheta: 1.2,
+      pointSizeScale: 1,
+      scalePointsOnZoom: true,
+      hoveredPointCursor: 'pointer',
+      renderHoveredPointRing: true,
+      hoveredPointRingColor: 'white',
 
-    c.addEventListener('mouseup', e => {
-      if (this._dragNode) {
-        if (!this._dragMoved) {
-          this._select(this._dragNode);
-          if (this.onNodeClick) this.onNodeClick(this._dragNode);
+      onPointClick: (index) => {
+        if (index === undefined || index === null) return;
+        const now = Date.now();
+
+        // Double-click detection (cosmos has no native dblclick)
+        if (index === this._lastClickIndex && now - this._lastClickTime < 400) {
+          this._lastClickTime = 0;
+          this._lastClickIndex = -1;
+          const node = this.nodes[index];
+          if (node && this.onNodeDblClick) this.onNodeDblClick(node);
+          return;
         }
-        this._dragNode.fx = null;
-        this._dragNode.fy = null;
-        this._dragNode = null;
-        this.simulation.alphaTarget(0);
-      } else if (this._isPanning) {
-        this._isPanning = false;
-      } else {
-        // Click on empty space
+        this._lastClickTime = now;
+        this._lastClickIndex = index;
+
+        const node = this.nodes[index];
+        if (node) {
+          this._select(node, index);
+          if (this.onNodeClick) this.onNodeClick(node);
+        }
+      },
+
+      onBackgroundClick: () => {
         this._deselect();
         if (this.onNodeClick) this.onNodeClick(null);
-      }
+      },
+
+      onPointMouseOver: (index) => {
+        if (index === undefined || index === null) return;
+        const node = this.nodes[index];
+        if (!node) return;
+        this._tooltip.textContent = node.label;
+        this._tooltip.style.display = 'block';
+        this._tooltip.style.left = (this._mouseX + 14) + 'px';
+        this._tooltip.style.top  = (this._mouseY - 6) + 'px';
+      },
+
+      onPointMouseOut: () => {
+        this._tooltip.style.display = 'none';
+      },
     });
-
-    c.addEventListener('dblclick', e => {
-      const [wx, wy] = this._screenToWorld(e.offsetX, e.offsetY);
-      const node = this._hitTest(wx, wy);
-      if (node && this.onNodeDblClick) this.onNodeDblClick(node);
-    });
   }
 
-  _screenToWorld(sx, sy) {
-    return [(sx - this.tx) / this.scale, (sy - this.ty) / this.scale];
-  }
-
-  _hitTest(wx, wy) {
-    // Iterate in reverse so top-drawn nodes are hit first
-    for (let i = this.nodes.length - 1; i >= 0; i--) {
-      const n  = this.nodes[i];
-      const dx = wx - (n.x ?? 0);
-      const dy = wy - (n.y ?? 0);
-      const r  = n.radius + 4;
-      if (dx * dx + dy * dy <= r * r) return n;
-    }
-    return null;
-  }
-
-  // ── Render loop ──────────────────────────────────────
-
-  _startLoop() {
-    const loop = () => {
-      this._draw();
-      this._raf = requestAnimationFrame(loop);
-    };
-    this._raf = requestAnimationFrame(loop);
-  }
-
-  _draw() {
-    const ctx = this.ctx;
-    const w   = this._cssW;
-    const h   = this._cssH;
-
-    // Clear
-    ctx.save();
-    ctx.setTransform(window.devicePixelRatio || 1, 0, 0, window.devicePixelRatio || 1, 0, 0);
-    ctx.fillStyle = '#0d1117';
-    ctx.fillRect(0, 0, w, h);
-
-    // Apply pan/zoom
-    ctx.translate(this.tx, this.ty);
-    ctx.scale(this.scale, this.scale);
-
-    const selected  = this.selectedNode;
-    const linkedSet = this._linkedSet;
-
-    // ── Links ──
-    for (let i = 0, n = this.links.length; i < n; i++) {
-      const l = this.links[i];
-      const sx = l.source.x, sy = l.source.y;
-      const tx = l.target.x, ty = l.target.y;
-      if (sx === undefined || tx === undefined) continue;
-
-      let alpha = l._type === 'shared-contributor' ? 0.15 : 0.1;
-      let lw = 1;
-
-      if (selected) {
-        const sid = l.source.id, tid = l.target.id;
-        if (sid === selected.id || tid === selected.id) {
-          alpha = 0.55;
-          lw = 2;
-        } else {
-          alpha = 0.03;
-        }
-      }
-
-      ctx.beginPath();
-      ctx.moveTo(sx, sy);
-      ctx.lineTo(tx, ty);
-      if (l._type === 'shared-contributor') {
-        ctx.strokeStyle = `rgba(63,185,80,${alpha})`;
-        ctx.setLineDash([5, 4]);
-      } else {
-        ctx.strokeStyle = `rgba(255,255,255,${alpha})`;
-        ctx.setLineDash([]);
-      }
-      ctx.lineWidth = lw;
-      ctx.stroke();
-    }
-    ctx.setLineDash([]);
-
-    // ── Nodes ──
-    for (let i = 0, n = this.nodes.length; i < n; i++) {
-      const d = this.nodes[i];
-      const x = d.x ?? 0;
-      const y = d.y ?? 0;
-      const color = this.colors[d.type] || '#888';
-
-      let nodeAlpha = 1;
-      if (selected && linkedSet && !linkedSet.has(d.id)) nodeAlpha = 0.12;
-
-      ctx.globalAlpha = nodeAlpha;
-
-      // Glow (simple radial gradient — much cheaper than SVG filter)
-      if (d.type === 'user' || d.type === 'org' || d.type === 'repo' || d === this.hoveredNode) {
-        const gr = d.radius * 2.5;
-        const grad = ctx.createRadialGradient(x, y, d.radius * 0.5, x, y, gr);
-        grad.addColorStop(0, _hexToRgba(color, d === this.hoveredNode ? 0.25 : 0.12));
-        grad.addColorStop(1, 'rgba(0,0,0,0)');
-        ctx.fillStyle = grad;
-        ctx.fillRect(x - gr, y - gr, gr * 2, gr * 2);
-      }
-
-      // Circle
-      ctx.beginPath();
-      ctx.arc(x, y, d.radius, 0, Math.PI * 2);
-      ctx.fillStyle = color;
-      ctx.fill();
-
-      // Stroke
-      if (d.expanded) {
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 2.5;
-        ctx.setLineDash([4, 3]);
-        ctx.stroke();
-        ctx.setLineDash([]);
-      } else {
-        ctx.strokeStyle = '#0d1117';
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
-      }
-
-      // Label
-      const isPrimary = d.type === 'user' || d.type === 'org';
-      const fontSize  = isPrimary ? 12 : 10;
-      const fontWeight = isPrimary ? '600' : '400';
-      ctx.font = `${fontWeight} ${fontSize}px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif`;
-      ctx.fillStyle = `rgba(173,181,189,${nodeAlpha})`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'top';
-      const maxLen = isPrimary ? 22 : 16;
-      const label  = d.label.length > maxLen ? d.label.slice(0, maxLen - 1) + '…' : d.label;
-      ctx.fillText(label, x, y + d.radius + 4);
-
-      ctx.globalAlpha = 1;
-    }
-
-    ctx.restore();
-  }
-
-  // ── Update ───────────────────────────────────────────
+  // ── Data ──────────────────────────────────────────────
 
   update(nodes, links) {
     this.nodes = nodes;
     this.links = links;
 
-    this.simulation.nodes(nodes);
-    this.simulation.force('link').links(links);
-    this.paused = false;
-    this.simulation.alpha(0.3).restart();
+    this.nodeIndexMap.clear();
+    for (let i = 0; i < nodes.length; i++) {
+      this.nodeIndexMap.set(nodes[i].id, i);
+    }
+
+    // Positions — random initial spread
+    const positions = new Float32Array(nodes.length * 2);
+    for (let i = 0; i < nodes.length; i++) {
+      positions[i * 2]     = (Math.random() - 0.5) * 4096;
+      positions[i * 2 + 1] = (Math.random() - 0.5) * 4096;
+    }
+
+    // Colors — RGBA floats 0-1
+    const colors = new Float32Array(nodes.length * 4);
+    for (let i = 0; i < nodes.length; i++) {
+      const c = this._rgbaCache[nodes[i].type] || [0.5, 0.5, 0.5, 1];
+      colors[i * 4]     = c[0];
+      colors[i * 4 + 1] = c[1];
+      colors[i * 4 + 2] = c[2];
+      colors[i * 4 + 3] = c[3];
+    }
+
+    // Sizes
+    const sizes = new Float32Array(nodes.length);
+    for (let i = 0; i < nodes.length; i++) {
+      sizes[i] = nodes[i].radius * 2;
+    }
+
+    // Links — index pairs
+    const linkArr = [];
+    const linkColors = [];
+    for (const l of links) {
+      const srcId = typeof l.source === 'object' ? l.source.id : l.source;
+      const tgtId = typeof l.target === 'object' ? l.target.id : l.target;
+      const si = this.nodeIndexMap.get(srcId);
+      const ti = this.nodeIndexMap.get(tgtId);
+      if (si !== undefined && ti !== undefined) {
+        linkArr.push(si, ti);
+        if (l._type === 'shared-contributor') {
+          linkColors.push(0.25, 0.73, 0.31, 0.35);
+        } else {
+          linkColors.push(1, 1, 1, 0.12);
+        }
+      }
+    }
+
+    this.graph.setPointPositions(positions);
+    this.graph.setPointColors(colors);
+    this.graph.setPointSizes(sizes);
+    this.graph.setLinks(new Float32Array(linkArr));
+    if (linkColors.length) this.graph.setLinkColors(new Float32Array(linkColors));
+
+    this._deselect();
+    if (!this.paused) this.graph.start();
   }
 
   // ── Selection ─────────────────────────────────────────
 
-  _select(node) {
+  _select(node, index) {
     this.selectedNode = node;
-    const linked = new Set([node.id]);
-    this.links.forEach(l => {
-      const s = l.source?.id ?? l.source, t = l.target?.id ?? l.target;
-      if (s === node.id || t === node.id) { linked.add(s); linked.add(t); }
+
+    // Highlight this node + its neighbors
+    const neighbors = this.graph.getNeighboringPointIndices(index) || [];
+    const highlighted = [index, ...neighbors];
+
+    this.graph.setConfigPartial({
+      highlightedPointIndices: highlighted,
+      pointGreyoutOpacity: 0.08,
+      focusedPointIndex: index,
     });
-    this._linkedSet = linked;
   }
 
   _deselect() {
     this.selectedNode = null;
-    this._linkedSet   = null;
+    this.graph.setConfigPartial({
+      highlightedPointIndices: undefined,
+      pointGreyoutOpacity: undefined,
+      focusedPointIndex: undefined,
+    });
   }
 
   // ── Camera ────────────────────────────────────────────
 
   fitView() {
-    if (!this.nodes.length) return;
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const n of this.nodes) {
-      if (n.x === undefined) continue;
-      minX = Math.min(minX, n.x - n.radius);
-      minY = Math.min(minY, n.y - n.radius);
-      maxX = Math.max(maxX, n.x + n.radius);
-      maxY = Math.max(maxY, n.y + n.radius);
-    }
-    if (!isFinite(minX)) return;
-    const bw  = maxX - minX;
-    const bh  = maxY - minY;
-    const pad = 60;
-    const sw  = this._cssW - pad * 2;
-    const sh  = this._cssH - pad * 2;
-    const s   = Math.min(sw / bw, sh / bh, 2);
-    this.scale = s;
-    this.tx = this._cssW / 2 - s * (minX + bw / 2);
-    this.ty = this._cssH / 2 - s * (minY + bh / 2);
+    this.graph.setConfigPartial({
+      fitViewByPointIndices: undefined,
+      fitViewDuration: 500,
+    });
   }
 
   zoomBy(factor) {
-    const cx = this._cssW / 2;
-    const cy = this._cssH / 2;
-    this.tx = cx - (cx - this.tx) * factor;
-    this.ty = cy - (cy - this.ty) * factor;
-    this.scale *= factor;
+    // Cosmos handles zoom via scroll wheel; buttons are approximate
+    this.graph.setConfigPartial({
+      initialZoomLevel: (this.graph.getZoomLevel?.() || 1) * factor,
+    });
   }
 
   togglePause() {
     this.paused = !this.paused;
     if (this.paused) {
-      this.simulation.stop();
+      this.graph.pause();
     } else {
-      this.simulation.alpha(0.15).restart();
+      this.graph.unpause();
     }
     return this.paused;
   }
 }
 
-// ── Helpers ─────────────────────────────────────────────
-
-function _hexToRgba(hex, alpha) {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return `rgba(${r},${g},${b},${alpha})`;
+function hexToFloats(hex) {
+  return [
+    parseInt(hex.slice(1, 3), 16) / 255,
+    parseInt(hex.slice(3, 5), 16) / 255,
+    parseInt(hex.slice(5, 7), 16) / 255,
+    1,
+  ];
 }

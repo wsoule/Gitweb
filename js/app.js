@@ -1,7 +1,10 @@
-class App {
+import { GitHubAPI } from './api.js'
+import { GitGraph } from './graph.js'
+
+export class App {
   constructor() {
     this.api   = new GitHubAPI();
-    this.graph = new GitGraph('graph');
+    this.graph = new GitGraph('graph-container');
 
     // Canonical data — node objects are reused across renders so D3 keeps positions
     this.nodeMap  = new Map();  // id → node object
@@ -513,6 +516,3 @@ function href(url) {
   return String(url).startsWith('http') ? url : 'https://' + url;
 }
 
-// ── Boot ───────────────────────────────────────────────
-
-document.addEventListener('DOMContentLoaded', () => { window.app = new App(); });

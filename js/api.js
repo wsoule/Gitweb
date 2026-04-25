@@ -1,4 +1,4 @@
-class GitHubAPI {
+export class GitHubAPI {
   constructor() {
     this.graphqlUrl = 'https://api.github.com/graphql';
     this.restUrl    = 'https://api.github.com';
