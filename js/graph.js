@@ -193,11 +193,10 @@ export class GitGraph {
   _select(node, index) {
     this.selectedNode = node;
 
-    // Highlight this node + its neighbors
     const neighbors = this.graph.getNeighboringPointIndices(index) || [];
     const highlighted = [index, ...neighbors];
 
-    this.graph.setConfigPartial({
+    this.graph.setConfig({
       highlightedPointIndices: highlighted,
       pointGreyoutOpacity: 0.08,
       focusedPointIndex: index,
@@ -206,7 +205,7 @@ export class GitGraph {
 
   _deselect() {
     this.selectedNode = null;
-    this.graph.setConfigPartial({
+    this.graph.setConfig({
       highlightedPointIndices: undefined,
       pointGreyoutOpacity: undefined,
       focusedPointIndex: undefined,
@@ -216,17 +215,12 @@ export class GitGraph {
   // ── Camera ────────────────────────────────────────────
 
   fitView() {
-    this.graph.setConfigPartial({
-      fitViewByPointIndices: undefined,
-      fitViewDuration: 500,
-    });
+    this.graph.fitView(500);
   }
 
   zoomBy(factor) {
-    // Cosmos handles zoom via scroll wheel; buttons are approximate
-    this.graph.setConfigPartial({
-      initialZoomLevel: (this.graph.getZoomLevel?.() || 1) * factor,
-    });
+    const current = this.graph.getZoomLevel() || 1;
+    this.graph.setZoomLevel(current * factor, 200);
   }
 
   togglePause() {
