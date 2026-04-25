@@ -2,7 +2,7 @@
   "name": "gitgraph",
   "version": "1.0.0",
   "scripts": {
-    "start": "npx serve . --listen $PORT"
+    "start": "node start.js"
   },
   "engines": {
     "node": ">=18"

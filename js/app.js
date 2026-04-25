@@ -10,6 +10,15 @@ class App {
 
     this.loading = false;
 
+    // Load token: config.js > localStorage > manual input
+    const savedToken = (typeof CONFIG !== 'undefined' && CONFIG.GITHUB_TOKEN)
+      || localStorage.getItem('gh_token')
+      || '';
+    if (savedToken) {
+      this.api.setToken(savedToken);
+      document.getElementById('token').value = savedToken;
+    }
+
     this.graph.onNodeClick = n => n ? this._showInfo(n) : this._hideInfo();
 
     // Double-click a user/org/contributor → expand their repos INTO the current graph
@@ -36,7 +45,12 @@ class App {
     document.getElementById('search-btn').addEventListener('click', () => this._search(inp.value.trim()));
     inp.addEventListener('keydown', e => { if (e.key === 'Enter') this._search(inp.value.trim()); });
 
-    document.getElementById('token').addEventListener('change', e => this.api.setToken(e.target.value));
+    document.getElementById('token').addEventListener('change', e => {
+      const val = e.target.value.trim();
+      this.api.setToken(val);
+      if (val) localStorage.setItem('gh_token', val);
+      else localStorage.removeItem('gh_token');
+    });
 
     ['show-contributors', 'show-languages', 'show-topics', 'hide-forks'].forEach(id =>
       document.getElementById(id).addEventListener('change', () => this._render())
