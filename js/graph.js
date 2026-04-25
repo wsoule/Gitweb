@@ -13,12 +13,12 @@ class GitGraph {
     this._nodeEls = [];
 
     this.colors = {
-      user:        '#f1c40f',
-      org:         '#f1c40f',
+      user:        '#e6edf3',
+      org:         '#e6edf3',
       repo:        '#58a6ff',
       contributor: '#3fb950',
-      language:    '#bc8cff',
-      topic:       '#ffa657',
+      language:    '#d2a8ff',
+      topic:       '#f0883e',
     };
 
     this._init();

@@ -11,11 +11,11 @@
   --accent:     #58a6ff;
   --accent2:    #79b8ff;
 
-  --user:        #f1c40f;
+  --user:        #e6edf3;
   --repo:        #58a6ff;
   --contributor: #3fb950;
-  --language:    #bc8cff;
-  --topic:       #ffa657;
+  --language:    #d2a8ff;
+  --topic:       #f0883e;
 }
 
 html, body {
@@ -293,11 +293,11 @@ main {
   padding: 2px 8px;
   border-radius: 20px;
 }
-.badge.user, .badge.org   { background: rgba(241,196,15,.14); color: var(--user); }
+.badge.user, .badge.org   { background: rgba(230,237,243,.14); color: var(--user); }
 .badge.repo               { background: rgba(88,166,255,.14); color: var(--repo); }
 .badge.contributor        { background: rgba(63,185,80,.14);  color: var(--contributor); }
-.badge.language           { background: rgba(188,140,255,.14);color: var(--language); }
-.badge.topic              { background: rgba(255,166,87,.14); color: var(--topic); }
+.badge.language           { background: rgba(210,168,255,.14);color: var(--language); }
+.badge.topic              { background: rgba(240,136,62,.14); color: var(--topic); }
 
 .info-bio {
   font-size: 13px; color: var(--muted);
